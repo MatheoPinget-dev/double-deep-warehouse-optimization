@@ -1,0 +1,10 @@
+.venv
+.env
+*.pyc
+__pycache__ 
+*.csv
+*.log
+*.tmp
+*.bak
+images/
+instances/

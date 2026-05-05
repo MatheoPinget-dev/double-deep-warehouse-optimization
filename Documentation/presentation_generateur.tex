@@ -1,0 +1,83 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\title{\textbf{Présentation Technique \& Logique}\\ Générateur d'Instances SBS/RS}
+\author{Documentation Technique}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introduction}
+Ce document présente de manière détaillée et vulgarisée le fonctionnement du script \texttt{instance\_generator.py}. Ce script est un outil de simulation et de génération de données conçu pour la \textbf{recherche opérationnelle}. Son but principal n'est pas de résoudre le rangement d'un entrepôt, mais de \textbf{créer des terrains de jeu (des problèmes ou "instances")} qui permettront ensuite de tester et de comparer des algorithmes de résolution (Heuristiques, Intelligence Artificielle, Métaheuristiques).
+
+Il modélise un entrepôt automatisé de type \textbf{SBS/RS} (Shuttle-Based Storage and Retrieval System). Concrètement, un robot circule dans une allée centrale unique pour stocker et récupérer des bacs sur des étagères situées de part et d'autre de cette allée.
+
+\section{Modélisation de l'Entrepôt en Données}
+Pour qu'un algorithme puisse traiter un entrepôt physique, il faut le transformer en un système de coordonnées mathématiques. Le code structure cet espace virtuel via les composants suivants :
+
+\begin{itemize}
+    \item \textbf{L'Étage (\texttt{Etage})} : L'entrepôt est découpé en grille et possède un certain nombre de $N$ colonnes de profondeur.
+    \item \textbf{Côté (\texttt{Cote})} : L'allée centrale sépare l'entrepôt en deux côtés bien distincts : la \texttt{GAUCHE} et la \texttt{DROITE}.
+    \item \textbf{Profondeur (\texttt{Profondeur})} : Le système est à "double profondeur". Chaque colonne d'étagère dispose d'une place directement accessible (\textbf{Avant}, côté allée) et d'une place située derrière la première (\textbf{Arrière}, au fond).
+    \item \textbf{La Demi-Colonne} : C'est le concept central du code. Une demi-colonne correspond à une travée sur un côté donné (par exemple: Colonne 3, côté Droit). Elle ne possède que \textbf{deux emplacements} (l'Avant et l'Arrière). La capacité totale de stockage est ainsi de $4 \times N$ emplacements.
+\end{itemize}
+
+\section{La Loi Physique Incontournable (Règle Back-First)}
+Le défi principal du problème vient d'une contrainte logistique et physique stricte implémentée dans le code (méthode \texttt{est\_valide()}).
+
+Puisque le bras mécanique accède aux bacs depuis l'allée centrale, la position "Avant" obstrue l'accès à la position "Arrière". De fait :
+\begin{center}
+    \textit{\textbf{Si l'on pose un seul bac dans une demi-colonne, la gravité ou le système de stockage le pousse obligatoirement au fond (à l'Arrière).}}
+\end{center}
+
+Il est physiquement impossible de déposer un bac à la place "Avant" si la place "Arrière" est vide. Le rôle crucial du générateur est de s'assurer que \textbf{100\% des configurations qu'il crée respectent cette contrainte mathématiquement}, sous peine de produire des situations aberrantes.
+
+\section{L'Algorithme de Génération : Créer du Chaos Contrôlé}
+Le but de l'outil est de disperser des bacs dans l'entrepôt pour produire une situation initiale "désordonnée". La fonction \texttt{generer\_configuration} orchestre cette répartition en 3 étapes :
+
+\subsection{Étape 1 : Le Paramètre de Volume}
+L'utilisateur demande un certain taux de remplissage (ex: 85\%). L'algorithme calcule combien de bacs physiques cela représente en fonction de la taille de l'entrepôt.
+
+\subsection{Étape 2 : Le Modèle de Distribution}
+Plutôt que d'assigner aléatoirement des emplacements à chaque bac (ce qui créerait presque inévitablement des infractions à la règle du "Back-first"), le système attribue intelligemment des "quantités" de bacs (0, 1 ou 2) par "demi-colonne". Deux stratégies sont au choix :
+\begin{itemize}
+    \item \textbf{Uniforme} : Les bacs sont répartis de manière équiprobable sur tout l'étage.
+    \item \textbf{Normale (Loi de Gauss)} : Simule un cas réel de "classement ABC" en logistique. Les algorithmes forcent une plus forte concentration de bacs à l'entrée de l'allée (Colonne 0), là où les temps de déplacements sont les plus courts.
+\end{itemize}
+
+\subsection{Étape 3 : Le Confinement Physique et le Mélange}
+Une fois les volumes alloués aux demi-colonnes :
+\begin{itemize}
+    \item Si une demi-colonne s'est vue attribuer \textbf{1 bac}, le programme force l'enregistrement de ce bac dans la case \textbf{Arrière}.
+    \item S'il y a \textbf{2 bacs}, ils sont placés dans les cases \textbf{Arrière} puis \textbf{Avant}.
+\end{itemize}
+Ensuite, l'algorithme "bat les cartes" (shuffle) pour associer les identifiants uniques des bacs à ces emplacements validés, générant un chaos purement aléatoire mais rigoureusement physique.
+
+\section{Création du Problème : État Initial vs. État Cible}
+Pour que l'algorithme d'Intelligence Artificielle de l'étudiant ait un problème à résoudre, il ne faut pas un, mais \textbf{deux} agencements de l'entrepôt. 
+
+La fonction \texttt{generer\_instance} fige l'ensemble de bacs créés, puis lance le moteur de génération deux fois de suite :
+\begin{enumerate}
+    \item La première fois pour créer la \textbf{Configuration Initiale} (l'état actuel, non optimisé).
+    \item La seconde fois pour créer la \textbf{Configuration Cible} (l'état désiré vers lequel le robot devra tendre).
+\end{enumerate}
+
+\section{Le Mode Laboratoire : Génération par Lots}
+L'évaluation d'un algorithme n'a de valeur scientifique que si elle s'appuie sur une volumétrie de données conséquente. La fonction \texttt{generer\_lot()} est un orchestrateur d'expériences massives.
+
+Elle parcourt de multiples tailles d'entrepôts et des taux de remplissages différents. Son atout majeur est la \textbf{reproductibilité}. En calculant une "Graine mathématique" (Seed) unique pour chaque simulation en fonction de ses paramètres, le chercheur garantit que le problème généré aléatoirement restera exactement le même s'il relance le code dans deux mois pour tester une nouvelle Heuristique. 
+Le tout est exporté en fichiers \texttt{CSV} agissant comme des bases de données prêtes à être ingérées par les scripts de résolution.
+
+\end{document}
