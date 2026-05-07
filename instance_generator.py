@@ -2,10 +2,10 @@
 Générateur d'instances — Réarrangement SBS/RS double profondeur (1 étage).
 ═══════════════════════════════════════════════════════════════════════════
 
-Ce module génère des instances de test pour le problème de réarrangement 
-d'un entrepôt automatisé (SBS/RS) à double profondeur. 
+Ce module génère des instances de test pour le problème de réarrangement
+d'un entrepôt automatisé (SBS/RS) à double profondeur.
 
-Il produit des paires de configurations (État Initial -> État Cible) composées 
+Il produit des paires de configurations (État Initial -> État Cible) composées
 du même ensemble de bacs, permettant d'évaluer les algorithmes de résolution.
 """
 
@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 # =============================================================================
-#  1. Structures de base (Énumérations)
+# 1. Structures de base (Énumérations)
 # =============================================================================
 
 class Cote(StrEnum):
@@ -34,8 +34,8 @@ class Profondeur(StrEnum):
     - AVANT : Accès direct depuis l'allée.
     - ARRIERE : Accessible uniquement si la position AVANT est vide.
     """
-    AVANT = "F"    
-    ARRIERE = "B"  
+    AVANT = "F"
+    ARRIERE = "B"
 
 class StrategieDistribution(StrEnum):
     """
@@ -43,11 +43,11 @@ class StrategieDistribution(StrEnum):
     - UNIFORME : Répartition purement aléatoire.
     - NORMALE : Concentration plus forte près de l'entrée (colonne 0).
     """
-    UNIFORME = "uniforme" 
-    NORMALE = "normale"   
+    UNIFORME = "uniforme"
+    NORMALE = "normale"
 
 # =============================================================================
-#  2. Définition des emplacements
+# 2. Définition des emplacements
 # =============================================================================
 
 class EmplacementStock(NamedTuple):
@@ -73,7 +73,7 @@ def distance(e1: Emplacement, e2: Emplacement, n_colonnes: int) -> int:
     return abs(colonne_de(e1, n_colonnes) - colonne_de(e2, n_colonnes))
 
 # =============================================================================
-#  3. Modélisation de l'espace (L'Étage)
+# 3. Modélisation de l'espace (L'Étage)
 # =============================================================================
 
 @dataclass(slots=True)
@@ -119,7 +119,7 @@ class Etage:
         return [(c, s) for c in range(self.n_colonnes) for s in Cote]
 
 # =============================================================================
-#  4. Gestion de l'état (La Configuration)
+# 4. Gestion de l'état (La Configuration)
 # =============================================================================
 
 @dataclass(slots=True)
@@ -158,17 +158,16 @@ class Configuration:
     def est_valide(self) -> bool:
         """
         Vérification de la contrainte physique "Back-First".
-        Il est physiquement impossible d'avoir un bac en position AVANT 
+        Il est physiquement impossible d'avoir un bac en position AVANT
         si la position ARRIERE de la même demi-colonne est vide.
         """
         occupes = self.emplacements_occupes()
         for c, s in self.etage.demi_colonnes():
             avant = EmplacementStock(c, s, Profondeur.AVANT)
             arriere = EmplacementStock(c, s, Profondeur.ARRIERE)
-            
             # Violation de contrainte : bac à l'avant mais vide à l'arrière
             if avant in occupes and arriere not in occupes:
-                return False 
+                return False
         return True
 
     def est_accessible(self, emplacement: Emplacement) -> bool:
@@ -203,25 +202,25 @@ class Configuration:
     def afficher(self, titre: str = "Configuration") -> str:
         """Génère une représentation textuelle ASCII de la configuration de l'entrepôt."""
         nc = self.etage.n_colonnes
-        largeur = 6 
+        largeur = 6
 
         def _contenu(c: int, s: Cote, p: Profondeur) -> str:
             emp = EmplacementStock(c, s, p)
             bac = self.bac_a(emp)
-            return f"{bac:4d}" if bac is not None else "  --"
+            return f"{bac:4d}" if bac is not None else " --"
 
-        en_tete = "         " + "".join(f"{c:^{largeur + 1}}" for c in range(nc))
-        sep_haut = "         ┌" + "┬".join("─" * largeur for _ in range(nc)) + "┐"
-        sep_mid = "         ├" + "┼".join("─" * largeur for _ in range(nc)) + "┤  ← allée"
-        sep_bas = "         └" + "┴".join("─" * largeur for _ in range(nc)) + "┘"
+        en_tete = " " + "".join(f"{c:^{largeur + 1}}" for c in range(nc))
+        sep_haut = " ┌" + "┬".join("─" * largeur for _ in range(nc)) + "┐"
+        sep_mid = " ├" + "┼".join("─" * largeur for _ in range(nc)) + "┤ ← allée"
+        sep_bas = " └" + "┴".join("─" * largeur for _ in range(nc)) + "┘"
 
         def _ligne(s: Cote, p: Profondeur) -> str:
-            label = f"  {s}-{p}    "
+            label = f" {s}-{p} "
             cellules = "│".join(f"{_contenu(c, s, p):^{largeur}}" for c in range(nc))
             return f"{label}│{cellules}│"
 
         lignes = [
-            f"\n  ╔═ {titre} ({self.n_bacs} bacs, remplissage {self.taux_remplissage:.0%}) ═╗\n",
+            f"\n ╔═ {titre} ({self.n_bacs} bacs, remplissage {self.taux_remplissage:.0%}) ═╗\n",
             en_tete,
             sep_haut,
             _ligne(Cote.GAUCHE, Profondeur.ARRIERE),
@@ -237,7 +236,7 @@ class Configuration:
         return self.afficher()
 
 # =============================================================================
-#  5. Moteurs de Génération Stochastique
+# 5. Moteurs de Génération Stochastique
 # =============================================================================
 
 def _repartir_bacs_uniforme(n_bacs: int, etage: Etage, rng: random.Random) -> list[int]:
@@ -247,18 +246,15 @@ def _repartir_bacs_uniforme(n_bacs: int, etage: Etage, rng: random.Random) -> li
     """
     demi_cols_dispos = etage.demi_colonnes()
     occupations_dict = {dc: 0 for dc in demi_cols_dispos}
-    
     bacs_restants = n_bacs
     while bacs_restants > 0:
         # Sélection équiprobable d'une demi-colonne
         choix = rng.choice(demi_cols_dispos)
         occupations_dict[choix] += 1
         bacs_restants -= 1
-        
         # Retrait de la demi-colonne si sa capacité maximale (2) est atteinte
         if occupations_dict[choix] == 2:
             demi_cols_dispos.remove(choix)
-            
     return [occupations_dict[dc] for dc in etage.demi_colonnes()]
 
 def _repartir_bacs_normale(n_bacs: int, etage: Etage, rng: random.Random) -> list[int]:
@@ -269,26 +265,23 @@ def _repartir_bacs_normale(n_bacs: int, etage: Etage, rng: random.Random) -> lis
     """
     demi_cols_dispos = etage.demi_colonnes()
     occupations_dict = {dc: 0 for dc in demi_cols_dispos}
-    
     # Paramètre d'étalement pondérant les colonnes proches de l'indice 0
     sigma = max(1.0, etage.n_colonnes / 3.0)
+    
     def get_weight(c: int) -> float:
         return math.exp(-0.5 * (c / sigma)**2)
         
     weights = [get_weight(c) for c, _ in demi_cols_dispos]
-    
     bacs_restants = n_bacs
     while bacs_restants > 0:
         # Sélection pondérée favorisant l'entrée
         choix = rng.choices(demi_cols_dispos, weights=weights, k=1)[0]
         occupations_dict[choix] += 1
         bacs_restants -= 1
-        
         if occupations_dict[choix] == 2:
             idx = demi_cols_dispos.index(choix)
             demi_cols_dispos.pop(idx)
             weights.pop(idx)
-            
     return [occupations_dict[dc] for dc in etage.demi_colonnes()]
 
 
@@ -300,7 +293,6 @@ def _generer_emplacements(
 ) -> list[EmplacementStock]:
     """Génère la liste des emplacements cibles respectant la contrainte Back-First."""
     demi_cols = etage.demi_colonnes()
-    
     if strategie == StrategieDistribution.NORMALE:
         occupations = _repartir_bacs_normale(n_bacs, etage, rng)
     else:
@@ -312,7 +304,6 @@ def _generer_emplacements(
             emplacements.append(EmplacementStock(c, s, Profondeur.ARRIERE))
         if occ == 2:
             emplacements.append(EmplacementStock(c, s, Profondeur.AVANT))
-            
     return emplacements
 
 def generer_configuration(
@@ -328,8 +319,8 @@ def generer_configuration(
 
     # Mélange final des identifiants et des positions
     bacs = list(bac_ids)
-    rng.shuffle(bacs)          
-    rng.shuffle(emplacements)  
+    rng.shuffle(bacs)
+    rng.shuffle(emplacements)
 
     affectation = dict(zip(bacs, emplacements, strict=True))
     return Configuration(etage=etage, affectation=affectation)
@@ -341,14 +332,12 @@ def generer_configuration_cible(
     prob_maintien_profondeur: float
 ) -> Configuration:
     """
-    Construit la configuration cible en favorisant le maintien de la profondeur 
+    Construit la configuration cible en favorisant le maintien de la profondeur
     (AVANT/ARRIERE) selon une probabilité donnée.
     """
     emplacements = _generer_emplacements(config_init.n_bacs, config_init.etage, rng, strategie)
-    
     cibles_arr = [e for e in emplacements if e.profondeur == Profondeur.ARRIERE]
     cibles_av = [e for e in emplacements if e.profondeur == Profondeur.AVANT]
-    
     bacs_voulant_arr = []
     bacs_voulant_av = []
     
@@ -368,7 +357,6 @@ def generer_configuration_cible(
     while len(bacs_voulant_arr) > len(cibles_arr):
         idx = rng.randrange(len(bacs_voulant_arr))
         bacs_voulant_av.append(bacs_voulant_arr.pop(idx))
-        
     while len(bacs_voulant_av) > len(cibles_av):
         idx = rng.randrange(len(bacs_voulant_av))
         bacs_voulant_arr.append(bacs_voulant_av.pop(idx))
@@ -396,7 +384,7 @@ def generer_instance(
 ) -> tuple[Configuration, Configuration]:
     """
     Génère une instance de problème complète.
-    Retourne un tuple (Configuration Initiale, Configuration Cible) utilisant 
+    Retourne un tuple (Configuration Initiale, Configuration Cible) utilisant
     exactement le même ensemble de bacs.
     """
     if not 0.0 < taux_remplissage <= 1.0:
@@ -425,7 +413,7 @@ def generer_instance(
     return config_initiale, config_cible
 
 # =============================================================================
-#  6. Sérialisation (Import/Export CSV)
+# 6. Sérialisation (Import/Export CSV)
 # =============================================================================
 
 _EN_TETES_CSV = ["config", "bac_id", "type", "colonne", "cote", "profondeur"]
@@ -474,7 +462,8 @@ def importer_instance(chemin: str | Path) -> tuple[Configuration, Configuration]
         for ligne in reader:
             bac_id = int(ligne["bac_id"])
             emp: Emplacement = EmplacementStock(
-                int(ligne["colonne"]), Cote(ligne["cote"]), Profondeur(ligne["profondeur"]))
+                int(ligne["colonne"]), Cote(ligne["cote"]), Profondeur(ligne["profondeur"])
+            )
             affectations[ligne["config"]][bac_id] = emp
 
     return (
@@ -483,7 +472,7 @@ def importer_instance(chemin: str | Path) -> tuple[Configuration, Configuration]
     )
 
 # =============================================================================
-#  7. Mode Laboratoire (Plan d'expériences par lots)
+# 7. Mode Laboratoire (Plan d'expériences par lots)
 # =============================================================================
 
 def generer_lot(
@@ -491,20 +480,47 @@ def generer_lot(
     taux: list[float] | None = None,
     repetitions: int = 10,
     strategie: StrategieDistribution = StrategieDistribution.UNIFORME,
-    prob_maintien_profondeur: float = 0.80,
+    prob_maintien_profondeur: list[float] | float = 0.80,
     dossier: str | Path = "instances",
+    clean: bool = False,
 ) -> Path:
     """
     Exécute un plan d'expériences massif pour évaluer les algorithmes.
-    Génère des instances pour diverses configurations de tailles et taux de remplissage.
+    Génère des instances pour diverses configurations de tailles, taux de remplissage
+    et probabilités de maintien de profondeur (-p).
+
+    Le paramètre prob_maintien_profondeur accepte désormais une liste de valeurs :
+    chaque valeur génère une série d'instances distincte encodée dans le nom de fichier
+    (ex: _p80_ pour 0.80). Si une seule valeur est passée, le comportement est identique
+    à l'ancienne version (rétrocompatible).
+
+    Si clean=True, tous les fichiers .csv existants dans le dossier sont supprimés
+    avant la génération pour éviter les mélanges entre anciennes et nouvelles instances.
     """
     if colonnes is None:
         colonnes = [5, 10, 20, 50]
     if taux is None:
         taux = [0.50, 0.60, 0.70, 0.80, 0.90, 0.92]
 
+    # Normalisation : accepter float ou liste de float
+    if isinstance(prob_maintien_profondeur, float):
+        probs = [prob_maintien_profondeur]
+    else:
+        probs = list(prob_maintien_profondeur)
+
     dossier = Path(dossier)
     dossier.mkdir(parents=True, exist_ok=True)
+
+    # --- NETTOYAGE OPTIONNEL DU DOSSIER ---
+    # Si clean=True, tous les fichiers .csv existants sont supprimés avant la génération.
+    # Cela évite de mélanger les instances d'une ancienne génération avec la nouvelle.
+    if clean:
+        anciens = list(dossier.glob("*.csv"))
+        if anciens:
+            print(f" [CLEAN] Suppression de {len(anciens)} fichier(s) existant(s) dans '{dossier}/'...")
+            for f in anciens:
+                f.unlink()
+            print(f" [CLEAN] Dossier vide. Nouvelle génération en cours...")
 
     # Initialisation du fichier de métriques
     recap_path = dossier / "recapitulatif.csv"
@@ -514,45 +530,53 @@ def generer_lot(
     ]
 
     lignes_recap: list[dict] = []
-    n_total = len(colonnes) * len(taux) * repetitions
+    # Total : une dimension supplémentaire pour les probabilités
+    n_total = len(colonnes) * len(taux) * repetitions * len(probs)
     compteur = 0
 
-    for nc in colonnes:
-        for t in taux:
-            for rep in range(repetitions):
-                # Calcul d'une graine déterministe pour garantir la reproductibilité
-                # de l'expérience scientifique indépendamment de l'environnement d'exécution.
-                graine = nc * 100_000 + int(t * 1000) + rep
-                compteur += 1
+    for p in probs:
+        for nc in colonnes:
+            for t in taux:
+                for rep in range(repetitions):
+                    # Graine déterministe : intègre aussi la prob pour éviter les collisions
+                    graine = nc * 100_000 + int(t * 1000) + rep + int(p * 100)
+                    compteur += 1
 
-                config_init, config_cible = generer_instance(
-                    n_colonnes=nc, taux_remplissage=t, graine=graine, strategie=strategie, 
-                    prob_maintien_profondeur=prob_maintien_profondeur
-                )
+                    config_init, config_cible = generer_instance(
+                        n_colonnes=nc, taux_remplissage=t, graine=graine, strategie=strategie,
+                        prob_maintien_profondeur=p
+                    )
 
-                strat_str = "uni" if strategie == StrategieDistribution.UNIFORME else "norm"
-                nom = f"inst_c{nc}_t{int(t*100)}_{strat_str}_r{rep:02d}.csv"
-                chemin = dossier / nom
-                exporter_instance(config_init, config_cible, chemin)
+                    strat_str = "uni" if strategie == StrategieDistribution.UNIFORME else "norm"
+                    # Encodage de la probabilité dans le nom : _p80_ pour 0.80
+                    p_str = f"p{int(p * 100):02d}"
+                    # Si une seule probabilité : nom rétrocompatible sans suffixe _pXX
+                    if len(probs) == 1:
+                        nom = f"inst_c{nc}_t{int(t*100)}_{strat_str}_r{rep:02d}.csv"
+                    else:
+                        nom = f"inst_c{nc}_t{int(t*100)}_{strat_str}_{p_str}_r{rep:02d}.csv"
+                    
+                    chemin = dossier / nom
+                    exporter_instance(config_init, config_cible, chemin)
 
-                # Extraction des métriques de complexité
-                deja = config_init.nb_bacs_deja_places(config_cible)
-                borne = config_init.distance_totale_vers(config_cible)
+                    # Extraction des métriques de complexité
+                    deja = config_init.nb_bacs_deja_places(config_cible)
+                    borne = config_init.distance_totale_vers(config_cible)
 
-                lignes_recap.append({
-                    "fichier": nom,
-                    "n_colonnes": nc,
-                    "taux_remplissage": round(t, 2),
-                    "n_bacs": config_init.n_bacs,
-                    "strategie": strategie.value,
-                    "graine": graine,
-                    "prob_maintien_profondeur": prob_maintien_profondeur,
-                    "bacs_a_deplacer": config_init.n_bacs - deja,
-                    "deja_places": deja,
-                    "borne_inferieure": borne,
-                })
+                    lignes_recap.append({
+                        "fichier": nom,
+                        "n_colonnes": nc,
+                        "taux_remplissage": round(t, 2),
+                        "n_bacs": config_init.n_bacs,
+                        "strategie": strategie.value,
+                        "graine": graine,
+                        "prob_maintien_profondeur": round(p, 2),
+                        "bacs_a_deplacer": config_init.n_bacs - deja,
+                        "deja_places": deja,
+                        "borne_inferieure": borne,
+                    })
 
-                print(f"  [{compteur:3d}/{n_total}] {nom}  ({config_init.n_bacs} bacs)")
+                    print(f" [{compteur:3d}/{n_total}] {nom} ({config_init.n_bacs} bacs, p={p:.2f})")
 
     # Sauvegarde des métriques du plan d'expériences
     with recap_path.open("w", newline="", encoding="utf-8") as f:
@@ -560,11 +584,11 @@ def generer_lot(
         writer.writeheader()
         writer.writerows(lignes_recap)
 
-    print(f"\n  ✓ {compteur} instances générées dans le dossier '{dossier}/'")
+    print(f"\n ✓ {compteur} instances générées dans le dossier '{dossier}/'")
     return dossier
 
 # =============================================================================
-#  8. Interface en Ligne de Commande (CLI)
+# 8. Interface en Ligne de Commande (CLI)
 # =============================================================================
 
 def main() -> None:
@@ -589,16 +613,29 @@ def main() -> None:
     p_lot.add_argument("--taux", "-t", type=float, nargs="+", default=[0.50, 0.60, 0.70, 0.80, 0.90, 0.92])
     p_lot.add_argument("--repetitions", "-r", type=int, default=10)
     p_lot.add_argument("--strategie", "-s", type=str, choices=["uniforme", "normale"], default="uniforme")
-    p_lot.add_argument("--prob-maintien", "-p", type=float, default=0.80, help="Probabilité qu'un bac garde la même profondeur (0 à 1)")
+    p_lot.add_argument(
+        "--prob-maintien", "-p",
+        type=float, nargs="+", default=[0.80],
+        help="Probabilite(s) qu'un bac garde la meme profondeur (0 a 1). Accepte plusieurs valeurs : -p 0.7 0.8 0.9"
+    )
     p_lot.add_argument("--dossier", "-d", type=str, default="instances")
+    p_lot.add_argument(
+        "--clean",
+        action="store_true",
+        default=False,
+        help="Supprimer tous les fichiers .csv existants dans le dossier avant de générer. Evite de mélanger anciennes et nouvelles instances."
+    )
 
     args = analyseur.parse_args()
 
     if args.commande == "lot":
         strat = StrategieDistribution(args.strategie)
+        # args.prob_maintien est maintenant une liste (nargs="+")
+        probs = args.prob_maintien if len(args.prob_maintien) > 1 else args.prob_maintien[0]
         generer_lot(
             colonnes=args.colonnes, taux=args.taux, repetitions=args.repetitions,
-            strategie=strat, prob_maintien_profondeur=args.prob_maintien, dossier=args.dossier,
+            strategie=strat, prob_maintien_profondeur=probs, dossier=args.dossier,
+            clean=args.clean,
         )
 
     elif args.commande == "une":
@@ -615,10 +652,10 @@ def main() -> None:
         borne_inf = config_init.distance_totale_vers(config_cible)
         deja_places = config_init.nb_bacs_deja_places(config_cible)
         
-        print(f"\n  ── Métriques ──")
-        print(f"  Bacs à déplacer  : {config_init.n_bacs - deja_places} / {config_init.n_bacs}")
-        print(f"  Bacs validés     : {deja_places}")
-        print(f"  Borne inférieure : {borne_inf} cases")
+        print(f"\n ── Métriques ──")
+        print(f" Bacs à déplacer : {config_init.n_bacs - deja_places} / {config_init.n_bacs}")
+        print(f" Bacs validés : {deja_places}")
+        print(f" Borne inférieure : {borne_inf} cases")
 
         if args.export:
             exporter_instance(config_init, config_cible, args.export)
