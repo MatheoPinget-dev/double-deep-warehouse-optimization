@@ -153,11 +153,16 @@ class HeuristiqueLookahead:
     le graphe sur ce futur virtuel, et choisit le mouvement qui maximise le
     nombre de bacs débloqués au tour suivant.
     """
-    def __init__(self, config_init: Configuration, config_cible: Configuration):
+    def __init__(self, config_init: Configuration, config_cible: Configuration, p_lib=1, p_vul=2, p_ino=3, pen_avant=1, cap_tabou=5):
         self.courante = config_init
         self.cible = config_cible
         self.colonne_navette = 0
         self.distance_totale_x = 0
+        self.p_lib = p_lib
+        self.p_vul = p_vul
+        self.p_ino = p_ino
+        self.pen_avant = pen_avant
+        self.cap_tabou = cap_tabou
         self.sequence_mouvements = []
         self.nb_double_handling = 0
         self.derniers_buffers = {}
@@ -210,20 +215,20 @@ class HeuristiqueLookahead:
         score = abs(col_actuelle - emp.colonne) + abs(emp.colonne - col_cible)
 
         if emp.profondeur == Profondeur.AVANT:
-            score += 1
+            score += self.pen_avant
 
         expiration = self.tabu_mouvements.get((bac_id, emp), -1)
         if self.iteration_actuelle <= expiration:
-            score += 10000  # [PARAMÈTRE OPTIMISÉ]
+            score += 1000 * self.courante.etage.n_colonnes  # Exclusion quasi-totale dynamique
 
         if self._est_cible_pour_un_bac(emp):
-            score += 600  # [PARAMÈTRE OPTIMISÉ]
+            score += 100 * self.courante.etage.n_colonnes  # Big-M dynamique cible
 
         if emp.profondeur == Profondeur.AVANT:
             emp_arr = EmplacementStock(emp.colonne, emp.cote, Profondeur.ARRIERE)
             bac_arr = self.courante.bac_a(emp_arr)
             if bac_arr is not None and self.cible.affectation[bac_arr] != emp_arr:
-                score += 5000  # [PARAMÈTRE OPTIMISÉ]
+                score += 500 * self.courante.etage.n_colonnes  # Big-M dynamique prison
 
         return score
 
@@ -234,15 +239,15 @@ class HeuristiqueLookahead:
         """
         emp = self.courante.affectation[bac_id]
         if emp.profondeur == Profondeur.ARRIERE:
-            return 2  # Vulnérable
+            return self.p_vul  # Vulnérable
         emp_arriere = EmplacementStock(emp.colonne, emp.cote, Profondeur.ARRIERE)
         bac_arriere = self.courante.bac_a(emp_arriere)
         if bac_arriere is None:
-            return 3  # Solitaire
+            return self.p_ino  # Inoffensif (pas de bac derrière)
         elif self._bac_est_place(bac_arriere):
-            return 4  # Inoffensif
+            return self.p_ino  # Inoffensif (le bac derrière est déjà bien placé)
         else:
-            return 1  # Libérateur
+            return self.p_lib  # Libérateur
 
     def _deplacer_bac(self, bac_id: int, dest: EmplacementStock, est_buffer: bool = False):
         """
@@ -259,7 +264,7 @@ class HeuristiqueLookahead:
 
         # [PARAMÈTRE OPTIMISÉ] cap = 5 pour H2 : l'anticipation évite les oscillations,
         # une durée courte laisse à H2 plus de liberté dans les zones denses.
-        duree_tabou = min(5, len(self.courante.affectation) // 2)
+        duree_tabou = min(self.cap_tabou, len(self.courante.affectation) // 2)
         self.tabu_mouvements[(bac_id, source)] = self.iteration_actuelle + duree_tabou
 
         action = (

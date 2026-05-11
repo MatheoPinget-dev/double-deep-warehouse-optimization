@@ -171,7 +171,7 @@ class HeuristiqueConstructive:
     (poids statiques), et casse les deadlocks en évaluant les buffers par score
     de pénalité (méthode du Grand-M).
     """
-    def __init__(self, config_init: Configuration, config_cible: Configuration):
+    def __init__(self, config_init: Configuration, config_cible: Configuration, p_lib=1, p_vul=2, p_ino=3, pen_avant=1, cap_tabou=20):
         self.courante = config_init
         self.cible = config_cible
         self.colonne_navette = 0
@@ -184,6 +184,11 @@ class HeuristiqueConstructive:
 
         # [PARAMÈTRE OPTIMISÉ] 10× le nombre de bacs garantit la résolution
         self.max_iterations = len(config_init.affectation) * 10
+        self.p_lib = p_lib
+        self.p_vul = p_vul
+        self.p_ino = p_ino
+        self.pen_avant = pen_avant
+        self.cap_tabou = cap_tabou
 
     def _bac_est_place(self, bac_id: int) -> bool:
         """Vérifie si le bac a atteint sa destination finale."""
@@ -219,23 +224,23 @@ class HeuristiqueConstructive:
 
             # Légère préférence pour l'ARRIERE (laisse l'AVANT disponible)
             if emp.profondeur == Profondeur.AVANT:
-                score += 1
+                score += self.pen_avant
 
             # PÉNALITÉ TABOU : interdit de revenir sur la position source récente
             expiration = self.tabu_mouvements.get((bac_id, emp), -1)
             if self.iteration_actuelle <= expiration:
-                score += 10000  # [PARAMÈTRE OPTIMISÉ] Exclusion quasi-totale
+                score += 1000 * self.courante.etage.n_colonnes  # Exclusion quasi-totale dynamique
 
             # PÉNALITÉ CIBLE : évite de voler la cible finale d'un autre bac
             if self._est_cible_pour_un_bac(emp):
-                score += 600  # [PARAMÈTRE OPTIMISÉ]
+                score += 100 * self.courante.etage.n_colonnes  # Big-M dynamique
 
             # PÉNALITÉ PRISON : évite de bloquer un bac mal placé à l'ARRIERE
             if emp.profondeur == Profondeur.AVANT:
                 emp_arr = EmplacementStock(emp.colonne, emp.cote, Profondeur.ARRIERE)
                 bac_arr = self.courante.bac_a(emp_arr)
                 if bac_arr is not None and self.cible.affectation[bac_arr] != emp_arr:
-                    score += 5000  # [PARAMÈTRE OPTIMISÉ]
+                    score += 500 * self.courante.etage.n_colonnes  # Big-M dynamique prison
 
             if score < meilleur_score:
                 meilleur_score = score
@@ -259,7 +264,7 @@ class HeuristiqueConstructive:
 
         # Durée tabou proportionnelle à la taille de l'entrepôt
         # [PARAMÈTRE OPTIMISÉ] cap = 20 pour H1
-        duree_tabou = min(20, len(self.courante.affectation) // 2)
+        duree_tabou = min(self.cap_tabou, len(self.courante.affectation) // 2)
         self.tabu_mouvements[(bac_id, source)] = self.iteration_actuelle + duree_tabou
 
         action = (
@@ -279,23 +284,22 @@ class HeuristiqueConstructive:
         Profils (du plus au moins prioritaire) :
           1 — Libérateur : AVANT, bloque un bac mal placé à l'ARRIERE → déplacer débloque.
           2 — Vulnérable : ARRIERE → risque d'emprisonnement si un bac se pose devant.
-          3 — Solitaire  : AVANT, ARRIERE vide → seul dans sa demi-colonne.
-          4 — Inoffensif : AVANT, ARRIERE déjà à sa cible finale → basse priorité.
+          3 — Inoffensif : AVANT, ARRIERE déjà à sa cible finale → basse priorité.
         """
         emp = self.courante.affectation[bac_id]
 
         if emp.profondeur == Profondeur.ARRIERE:
-            return 2  # Vulnérable
+            return self.p_vul  # Vulnérable
 
         emp_arriere = EmplacementStock(emp.colonne, emp.cote, Profondeur.ARRIERE)
         bac_arriere = self.courante.bac_a(emp_arriere)
 
         if bac_arriere is None:
-            return 3  # Solitaire
+            return self.p_ino  # Inoffensif (pas de bac derrière)
         elif self._bac_est_place(bac_arriere):
-            return 4  # Inoffensif
+            return self.p_ino  # Inoffensif (le bac derrière est déjà bien placé)
         else:
-            return 1  # Libérateur
+            return self.p_lib  # Libérateur
 
     def planifier_mouvements(self):
         """
