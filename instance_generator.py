@@ -65,11 +65,30 @@ class EmplacementStock(NamedTuple):
 type Emplacement = EmplacementStock
 
 def colonne_de(emplacement: Emplacement, n_colonnes: int) -> int:
-    """Extrait l'indice de colonne d'un emplacement."""
+    """
+    Extrait l'indice de colonne d'un emplacement.
+    
+    Args:
+        emplacement (Emplacement): L'emplacement à analyser.
+        n_colonnes (int): Le nombre total de colonnes.
+        
+    Returns:
+        int: L'indice de la colonne.
+    """
     return emplacement.colonne
 
 def distance(e1: Emplacement, e2: Emplacement, n_colonnes: int) -> int:
-    """Calcule la distance de Manhattan stricte sur l'axe des colonnes."""
+    """
+    Calcule la distance de Manhattan stricte sur l'axe des colonnes.
+    
+    Args:
+        e1 (Emplacement): Le premier emplacement.
+        e2 (Emplacement): Le deuxième emplacement.
+        n_colonnes (int): Le nombre total de colonnes.
+        
+    Returns:
+        int: La distance absolue en nombre de colonnes.
+    """
     return abs(colonne_de(e1, n_colonnes) - colonne_de(e2, n_colonnes))
 
 # =============================================================================
@@ -114,7 +133,11 @@ class Etage:
     def demi_colonnes(self) -> list[tuple[int, Cote]]:
         """
         Génère les paires (colonne, côté).
+        
         Une "demi-colonne" correspond à une travée offrant 2 profondeurs (AVANT/ARRIERE).
+        
+        Returns:
+            list[tuple[int, Cote]]: Liste de toutes les demi-colonnes de l'étage.
         """
         return [(c, s) for c in range(self.n_colonnes) for s in Cote]
 
@@ -132,16 +155,34 @@ class Configuration:
     affectation: dict[int, Emplacement] = field(default_factory=dict)
 
     def emplacements_occupes(self) -> set[Emplacement]:
-        """Retourne l'ensemble des coordonnées actuellement occupées."""
+        """
+        Retourne l'ensemble des coordonnées actuellement occupées.
+        
+        Returns:
+            set[Emplacement]: L'ensemble des emplacements contenant un bac.
+        """
         return set(self.affectation.values())
 
     def emplacements_vides_stock(self) -> list[EmplacementStock]:
-        """Retourne l'ensemble des coordonnées libres."""
+        """
+        Retourne l'ensemble des coordonnées libres de l'entrepôt.
+        
+        Returns:
+            list[EmplacementStock]: Les emplacements physiques ne contenant aucun bac.
+        """
         occupes = self.emplacements_occupes()
         return [e for e in self.etage.stocks if e not in occupes]
 
     def bac_a(self, emplacement: Emplacement) -> int | None:
-        """Identifie quel bac occupe un emplacement précis."""
+        """
+        Identifie quel bac occupe un emplacement précis.
+        
+        Args:
+            emplacement (Emplacement): La coordonnée à inspecter.
+            
+        Returns:
+            int | None: L'identifiant du bac s'il y en a un, sinon None.
+        """
         for bac, emp in self.affectation.items():
             if emp == emplacement:
                 return bac
@@ -158,8 +199,12 @@ class Configuration:
     def est_valide(self) -> bool:
         """
         Vérification de la contrainte physique "Back-First".
+        
         Il est physiquement impossible d'avoir un bac en position AVANT
         si la position ARRIERE de la même demi-colonne est vide.
+        
+        Returns:
+            bool: True si la configuration est physiquement cohérente.
         """
         occupes = self.emplacements_occupes()
         for c, s in self.etage.demi_colonnes():
@@ -173,7 +218,14 @@ class Configuration:
     def est_accessible(self, emplacement: Emplacement) -> bool:
         """
         Vérifie si un emplacement est accessible par la navette.
+        
         La position ARRIERE nécessite que la position AVANT soit libre.
+        
+        Args:
+            emplacement (Emplacement): La coordonnée à inspecter.
+            
+        Returns:
+            bool: True si la navette peut y déposer ou retirer un bac directement.
         """
         occupes = self.emplacements_occupes()
         if emplacement.profondeur == Profondeur.AVANT:
@@ -183,8 +235,15 @@ class Configuration:
 
     def distance_totale_vers(self, cible: Configuration) -> int:
         """
-        Calcule la borne inférieure de déplacement.
+        Calcule la borne inférieure de déplacement (Distance Idéale).
+        
         Somme des distances de Manhattan directes entre chaque bac et sa cible.
+        
+        Args:
+            cible (Configuration): L'état cible à atteindre.
+            
+        Returns:
+            int: La distance absolue minimale théorique.
         """
         total = 0
         for bac_id, emp_init in self.affectation.items():
@@ -193,7 +252,15 @@ class Configuration:
         return total
 
     def nb_bacs_deja_places(self, cible: Configuration) -> int:
-        """Compte le nombre de bacs dont la position initiale est déjà la position cible."""
+        """
+        Compte le nombre de bacs dont la position initiale est déjà la position cible.
+        
+        Args:
+            cible (Configuration): L'état cible de référence.
+            
+        Returns:
+            int: Le nombre de bacs bien placés.
+        """
         return sum(
             1 for bac_id, emp in self.affectation.items()
             if cible.affectation.get(bac_id) == emp
@@ -384,8 +451,22 @@ def generer_instance(
 ) -> tuple[Configuration, Configuration]:
     """
     Génère une instance de problème complète.
-    Retourne un tuple (Configuration Initiale, Configuration Cible) utilisant
-    exactement le même ensemble de bacs.
+    
+    Crée un état initial puis un état cible aléatoires utilisant exactement 
+    le même ensemble de bacs, tout en respectant les contraintes physiques de l'entrepôt.
+    
+    Args:
+        n_colonnes (int): Le nombre de colonnes de l'étage.
+        taux_remplissage (float): Proportion d'emplacements occupés (]0, 1]).
+        graine (int | None): Graine aléatoire pour la reproductibilité.
+        strategie (StrategieDistribution): Algorithme de dispersion (Uniforme/Normale).
+        prob_maintien_profondeur (float): Probabilité qu'un bac garde sa profondeur d'origine.
+        
+    Returns:
+        tuple[Configuration, Configuration]: Le couple (État Initial, État Cible).
+        
+    Raises:
+        ValueError: Si le taux de remplissage ou la probabilité est hors bornes.
     """
     if not 0.0 < taux_remplissage <= 1.0:
         raise ValueError("Le taux de remplissage doit être dans ]0, 1].")
@@ -419,7 +500,17 @@ def generer_instance(
 _EN_TETES_CSV = ["config", "bac_id", "type", "colonne", "cote", "profondeur"]
 
 def exporter_instance(config_init: Configuration, config_cible: Configuration, chemin: str | Path) -> None:
-    """Exporte l'instance générée (Initiale et Cible) au format CSV standardisé."""
+    """
+    Exporte l'instance générée (Initiale et Cible) au format CSV standardisé.
+    
+    Les métadonnées globales (colonnes, bacs, taux) sont écrites en commentaire 
+    au début du fichier. Les lignes suivantes décrivent les affectations.
+    
+    Args:
+        config_init (Configuration): L'état initial.
+        config_cible (Configuration): L'état cible.
+        chemin (str | Path): Le chemin absolu ou relatif de destination du fichier CSV.
+    """
     chemin = Path(chemin)
     with chemin.open("w", newline="", encoding="utf-8") as f:
         # En-tête des métadonnées pour la traçabilité
@@ -441,7 +532,21 @@ def exporter_instance(config_init: Configuration, config_cible: Configuration, c
                 })
 
 def importer_instance(chemin: str | Path) -> tuple[Configuration, Configuration]:
-    """Recharge en mémoire une instance à partir de son fichier CSV."""
+    """
+    Recharge en mémoire une instance complète à partir de son fichier CSV.
+    
+    Lit les métadonnées pour reconstruire l'étage, puis parse les lignes pour 
+    reconstituer les dictionnaires d'affectation des deux configurations.
+    
+    Args:
+        chemin (str | Path): Le chemin vers le fichier CSV.
+        
+    Returns:
+        tuple[Configuration, Configuration]: Le couple (État Initial, État Cible).
+        
+    Raises:
+        ValueError: Si le fichier est corrompu ou si les métadonnées sont absentes.
+    """
     chemin = Path(chemin)
     n_colonnes: int | None = None
 
@@ -486,16 +591,26 @@ def generer_lot(
 ) -> Path:
     """
     Exécute un plan d'expériences massif pour évaluer les algorithmes.
+    
     Génère des instances pour diverses configurations de tailles, taux de remplissage
     et probabilités de maintien de profondeur (-p).
 
-    Le paramètre prob_maintien_profondeur accepte désormais une liste de valeurs :
+    Le paramètre `prob_maintien_profondeur` accepte désormais une liste de valeurs :
     chaque valeur génère une série d'instances distincte encodée dans le nom de fichier
     (ex: _p80_ pour 0.80). Si une seule valeur est passée, le comportement est identique
     à l'ancienne version (rétrocompatible).
 
-    Si clean=True, tous les fichiers .csv existants dans le dossier sont supprimés
-    avant la génération pour éviter les mélanges entre anciennes et nouvelles instances.
+    Args:
+        colonnes (list[int] | None): Tailles d'entrepôts à tester.
+        taux (list[float] | None): Différents taux de remplissages.
+        repetitions (int): Nombre d'instances par configuration.
+        strategie (StrategieDistribution): Modèle de distribution stochastique.
+        prob_maintien_profondeur (list[float] | float): Probabilité(s) de conservation ARRIERE/AVANT.
+        dossier (str | Path): Répertoire cible d'export.
+        clean (bool): Si True, purge les CSV du dossier cible avant la génération.
+        
+    Returns:
+        Path: Le chemin absolu vers le dossier contenant les instances générées.
     """
     if colonnes is None:
         colonnes = [5, 10, 20, 50]
@@ -592,7 +707,13 @@ def generer_lot(
 # =============================================================================
 
 def main() -> None:
-    """Point d'entrée du programme. Gère le parsing des arguments système."""
+    """
+    Point d'entrée du programme en ligne de commande.
+    
+    Gère le parsing des arguments système avec `argparse` pour offrir deux modes :
+    - Mode unitaire (`une`) : Affiche une configuration unique dans le terminal.
+    - Mode lot (`lot`) : Lance une campagne de génération massive.
+    """
     analyseur = argparse.ArgumentParser(
         description="Générateur d'instances SBS/RS double profondeur."
     )

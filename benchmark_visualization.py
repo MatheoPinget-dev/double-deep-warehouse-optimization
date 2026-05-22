@@ -8,14 +8,76 @@
 
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
 import seaborn as sns
 from pathlib import Path
 import re
 
+# =============================================================================
+# UTILITAIRE : Sauvegarde du tracking itératif consolidé (AXE 3.1)
+# =============================================================================
+
+def sauvegarder_historique_consolide(
+    resultats: list[dict],
+    algorithme: str,
+    output: str = "resultats/historique_consolide.csv"
+):
+    """
+    Sauvegarde les historiques itératifs de toutes les instances dans un CSV consolidé.
+    
+    Agrége les métriques de chaque itération pour permettre l'analyse de la progression
+    topologique et l'évolution des blocages (G15).
+
+    Args:
+        resultats (list[dict]): La liste de dictionnaires de résultats (contenant '_historique').
+        algorithme (str): L'identifiant de l'algorithme (ex: 'H1', 'H2').
+        output (str): Le chemin du fichier CSV de sortie.
+    """
+    rows = []
+    for res in resultats:
+        instance_id = Path(res.get("Fichier", "?")).stem
+        for snap in res.get("_historique", []):
+            rows.append({
+                "instance_id": instance_id,
+                "algorithme": algorithme,
+                **snap
+            })
+
+    if not rows:
+        print(f"[Tracking] Aucun historique à sauvegarder pour {algorithme}.")
+        return
+
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Append mode pour consolider plusieurs algos dans le même fichier
+    mode = "a" if output_path.exists() else "w"
+    write_header = not output_path.exists()
+
+    import csv
+    with open(output_path, mode, newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["instance_id", "algorithme", "iteration",
+                        "bacs_mal_places", "somme_degres_entrants",
+                        "degre_max", "nb_noeuds_en_cycle"]
+        )
+        if write_header:
+            writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"[Tracking] {len(rows)} snapshots sauvegardés dans '{output}'.")
+
 def generate_benchmark_graphs(dossier_resultats: str = "resultats"):
     """
-    Analyse tous les fichiers CSV de résultats et génère une suite de 14 graphiques.
-    Récupère les paramètres de l'instance directement depuis les noms de fichiers.
+    Analyse les fichiers CSV de résultats et génère une suite de 14 graphiques comparatifs.
+    
+    Récupère automatiquement les paramètres d'instance depuis les noms de fichiers 
+    (taux de remplissage, taille) et produit des métriques de performance, 
+    de scalabilité et de ratios énergétiques.
+    
+    Args:
+        dossier_resultats (str): Le répertoire contenant les fichiers CSV de résultats.
     """
     path_res = Path(dossier_resultats)
     dfs = []
@@ -228,5 +290,180 @@ def generate_benchmark_graphs(dossier_resultats: str = "resultats"):
 
     print("✅ Analyse terminée. Images disponibles dans le dossier 'images/'.")
 
+
+# =============================================================================
+# AXE 3.2 — Graphique de progression itérative (G15)
+# =============================================================================
+
+def generer_graphique_progression(
+    fichier_historique: str = "resultats/historique_consolide.csv",
+    instance_id: str | None = None,
+    dossier_img: str = "images"
+):
+    """
+    Génère le Graphique G15 : Évolution itérative des métriques de résolution.
+    
+    Superpose la diminution des bacs mal placés et l'évolution de la complexité 
+    topologique (somme des degrés entrants) au fil des itérations.
+
+    Args:
+        fichier_historique (str): Le chemin vers le fichier CSV consolidé.
+        instance_id (str | None): L'identifiant de l'instance spécifique, ou None 
+            pour calculer la moyenne globale sur toutes les instances.
+        dossier_img (str): Le dossier de sortie pour enregistrer l'image.
+    """
+    hist_path = Path(fichier_historique)
+    if not hist_path.exists():
+        print(f"[G15] Fichier introuvable : {fichier_historique}")
+        print("      Lancez d'abord les heuristiques avec sauvegarder_historique_consolide().")
+        return
+
+    df = pd.read_csv(hist_path)
+
+    if instance_id:
+        df = df[df["instance_id"] == instance_id]
+        titre = f"G15 — Progression itérative : {instance_id}"
+    else:
+        # Moyenne sur toutes les instances, alignée sur l'itération
+        df = df.groupby(["algorithme", "iteration"]).agg(
+            bacs_mal_places=("bacs_mal_places", "mean"),
+            somme_degres_entrants=("somme_degres_entrants", "mean")
+        ).reset_index()
+        titre = "G15 — Progression itérative moyenne (toutes instances)"
+
+    algos = df["algorithme"].unique()
+    palette = sns.color_palette("tab10", len(algos))
+    couleurs = dict(zip(algos, palette))
+
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+    ax2 = ax1.twinx()
+
+    for algo in algos:
+        d = df[df["algorithme"] == algo].sort_values("iteration")
+        c = couleurs[algo]
+        ax1.plot(d["iteration"], d["bacs_mal_places"],
+                 color=c, linewidth=2, label=f"{algo} — Bacs mal placés")
+        ax2.plot(d["iteration"], d["somme_degres_entrants"],
+                 color=c, linewidth=1.5, linestyle="--",
+                 label=f"{algo} — Somme degrés")
+
+    ax1.set_xlabel("Itération")
+    ax1.set_ylabel("Bacs mal placés", color="#333333")
+    ax2.set_ylabel("Somme des degrés entrants", color="#666666")
+    ax1.tick_params(axis="y", labelcolor="#333333")
+    ax2.tick_params(axis="y", labelcolor="#666666")
+
+    # Légende unifiée
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=9)
+
+    plt.title(titre, pad=15)
+    plt.tight_layout()
+
+    out = Path(dossier_img)
+    out.mkdir(exist_ok=True)
+    plt.savefig(out / "15_progression_iterative.png", dpi=300)
+    plt.close()
+    print("✅ G15 sauvegardé : images/15_progression_iterative.png")
+
+
+# =============================================================================
+# AXE 3.3 — Graphique de corrélation des échecs (G16)
+# =============================================================================
+
+def generer_graphique_echecs(
+    dossier_resultats: str = "resultats",
+    dossier_img: str = "images"
+):
+    """
+    Génère le Graphique G16 : Scatter plot de corrélation des échecs (Deadlocks/Timeouts).
+    
+    Permet de visualiser les facteurs structurels responsables des échecs des heuristiques.
+    
+    Args:
+        dossier_resultats (str): Le répertoire contenant les fichiers CSV de résultats.
+        dossier_img (str): Le dossier de sortie pour enregistrer l'image.
+    """
+    path_res = Path(dossier_resultats)
+    dfs = []
+    for fichier in path_res.glob("*.csv"):
+        if "resultat" not in fichier.stem.lower():
+            continue
+        nom_algo = fichier.stem.replace("resultat_", "").replace("resultats_", "").upper()
+        try:
+            df_temp = pd.read_csv(fichier)
+            if df_temp.empty:
+                continue
+            df_temp.rename(columns={
+                "Fichier": "fichier", "Statut": "statut",
+            }, inplace=True)
+            df_temp["algorithme"] = nom_algo
+            dfs.append(df_temp)
+        except Exception:
+            continue
+
+    if not dfs:
+        print("[G16] Aucune donnée de résultat trouvée.")
+        return
+
+    df = pd.concat(dfs, ignore_index=True)
+
+    # Filtrer uniquement les échecs ayant des métriques d'échec
+    echecs = df[
+        (df["statut"].isin(["Deadlock", "Timeout"])) &
+        (df.get("Echec_Degre_Max", pd.Series(dtype=float)) > 0)
+    ].copy()
+
+    if echecs.empty:
+        print("[G16] Aucun échec avec métriques disponible. "
+              "Assurez-vous que les CSV contiennent les colonnes Echec_*.")
+        return
+
+    # Extraction des paramètres d'instance depuis les noms de fichiers
+    def extract_params(filename):
+        c = re.search(r'_c(\d+)_', str(filename))
+        t = re.search(r'_t(\d+)_', str(filename))
+        return pd.Series({
+            'n_colonnes': int(c.group(1)) if c else 0,
+            'taux_remplissage': int(t.group(1)) if t else 0,
+        })
+
+    echecs[["n_colonnes", "taux_remplissage"]] = echecs["fichier"].apply(extract_params)
+
+    plt.figure(figsize=(12, 7))
+    scatter = sns.scatterplot(
+        data=echecs,
+        x="taux_remplissage",
+        y="Echec_Degre_Max",
+        hue="n_colonnes",
+        style="algorithme",
+        size="Echec_Somme_Degres" if "Echec_Somme_Degres" in echecs.columns else None,
+        sizes=(40, 300),
+        palette="viridis",
+        alpha=0.8
+    )
+
+    plt.title(
+        "G16 — Corrélation des échecs : Degré max vs Taux de remplissage\n"
+        "(Taille = somme des degrés, Couleur = nb colonnes)",
+        pad=15
+    )
+    plt.xlabel("Taux de remplissage (%)")
+    plt.ylabel("Degré entrant max au moment de l'échec")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=8)
+    plt.tight_layout()
+
+    out = Path(dossier_img)
+    out.mkdir(exist_ok=True)
+    plt.savefig(out / "16_correlation_echecs.png", dpi=300, bbox_inches="tight")
+    plt.close()
+    print("✅ G16 sauvegardé : images/16_correlation_echecs.png")
+
+
 if __name__ == "__main__":
     generate_benchmark_graphs()
+    # Décommenter pour générer G15 (nécessite historique_consolide.csv) :
+    # generer_graphique_progression()
+    # Décommenter pour générer G16 (nécessite colonnes Echec_* dans CSV) :
+    # generer_graphique_echecs()

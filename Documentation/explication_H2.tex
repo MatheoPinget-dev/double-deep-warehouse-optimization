@@ -1,0 +1,546 @@
+\documentclass[11pt,a4paper]{article}
+
+% ===== Packages =====
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[numbers]{natbib}
+\usepackage[french]{babel}
+\usepackage[top=2.5cm,bottom=2.5cm,left=2.5cm,right=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,backgrounds,shapes.geometric}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black}
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{enumitem} 
+\usepackage{float}
+\usepackage{graphicx}
+
+% ===== Couleurs =====
+\definecolor{bleuDIBP}{RGB}{30,80,150}
+\definecolor{vertDef}{RGB}{20,110,60}
+\definecolor{orangeHyp}{RGB}{180,80,0}
+\definecolor{rougeObj}{RGB}{150,20,20}
+
+% ===== Environnements =====
+\newtcolorbox{mydef}[1]{
+  colback=vertDef!5, colframe=vertDef,
+  fonttitle=\bfseries\color{white}, coltitle=white, attach boxed title to top left,
+  boxed title style={colback=vertDef}, title=#1, breakable, left=6pt, right=6pt
+}
+\newtcolorbox{myhyp}[1]{
+  colback=orangeHyp!5, colframe=orangeHyp,
+  fonttitle=\bfseries\color{white}, coltitle=white, attach boxed title to top left,
+  boxed title style={colback=orangeHyp}, title=#1, breakable, left=6pt, right=6pt
+}
+\newtcolorbox{myobj}{
+  colback=rougeObj!5, colframe=rougeObj,
+  fonttitle=\bfseries\color{white}, coltitle=white, attach boxed title to top left,
+  boxed title style={colback=rougeObj}, title=Problème d'optimisation, breakable,
+  left=6pt, right=6pt
+}
+\newtcolorbox{myrem}{
+  colback=gray!6, colframe=gray!50,
+  fonttitle=\bfseries, title=Remarque, breakable, left=6pt, right=6pt
+}
+
+% ===== Commandes =====
+\newcommand{\Front}{\mathsf{F}}
+\newcommand{\Back}{\mathsf{B}}
+\newcommand{\SG}{\mathsf{G}}
+\newcommand{\SD}{\mathsf{D}}
+\newcommand{\col}{\mathrm{col}}
+
+% ===== Titre =====
+\title{
+  \textbf{\color{bleuDIBP}Documentation Technique H2 : Heuristique Lookahead}\\[0.4em]
+  \large SBS/RS double profondeur -- navette tier-captive -- un étage\\[0.2em]
+  \normalsize Stage DISP -- Matheo Pinget
+}
+\date{\today}
+\author{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% -------------------------------------------------------
+\section{Introduction et Contexte Métier}
+% -------------------------------------------------------
+
+Le réarrangement d'entrepôts automatisés de type \textbf{SBS/RS (Shuttle-Based Storage and Retrieval Systems)} à double profondeur constitue un défi majeur en logistique interne. L'accès à un bac situé à l'arrière est conditionné par la vacance obligatoire de la position avant correspondante (contrainte physique \emph{LIFO} locale). 
+
+L'heuristique implémentée dans \texttt{H2.py} intègre un mécanisme d'anticipation combinatoire approfondie (\textbf{Deep Lookahead}) fondé sur l'algorithme de \textbf{Recherche en Faisceau (Beam Search)}. L'objectif est de garantir un \textbf{taux de réussite de 100\,\%} sur des instances soumises à une saturation critique, tout en maintenant une maîtrise rigoureuse de la complexité algorithmique pour supprimer tout risque de dépassement de temps d'exécution (\emph{Timeouts}) ou de verrous insolubles (\emph{Deadlocks}).
+
+% -------------------------------------------------------
+\section{Modélisation Topologique de l'Entrepôt}
+% -------------------------------------------------------
+Pour s'affranchir de la vision purement géométrique du problème, H2 modélise l'entrepôt sous la forme d'un graphe orienté de dépendances. Un arc orienté $A \rightarrow B$ signifie mathématiquement que \textbf{le bac A empêche le bac B de bouger} (soit car A est physiquement devant B, soit car A occupe la destination finale de B).
+
+\begin{mydef}{Convention Géométrique (Indexation)}
+Dans toute l'implémentation algorithmique et la présente documentation, l'espace de stockage de chaque demi-colonne est régi par l'indexation stricte suivante :
+\begin{itemize}[noitemsep]
+    \item \textbf{Index 0 (AVANT)} : Position de façade, accessible directement par la navette.
+    \item \textbf{Index 1 (ARRIÈRE)} : Position profonde, accessible uniquement si la position 0 est vide.
+\end{itemize}
+\end{mydef}
+
+\subsection{Les trois types d'arcs}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{>{\bfseries}p{3.5cm} p{10.2cm}}
+\toprule
+Type & Condition de génération de l'arc $X \to Y$ \\
+\midrule
+DUR\newline(physique) &
+  $X$ est en position AVANT (0) et $Y$ en position ARRIÈRE (1) de la
+  \emph{même} demi-colonne. $X$ bloque physiquement l'accès à $Y$
+  (contrainte LIFO). \\
+\addlinespace
+OCCUPATION\newline(logique) &
+  $X$ occupe l'emplacement cible de $Y$, \emph{ou} $X$ occupe la
+  position AVANT (0) de la demi-colonne dont l'ARRIÈRE (1) est la cible de $Y$.
+  $Y$ ne peut pas s'y installer tant que $X$ n'est pas parti. \\
+\addlinespace
+SÉQUENCEMENT\newline(logique) &
+  $Y$ cible la position AVANT (0) d'une demi-colonne, mais $X$ — qui cible
+  l'ARRIÈRE (1) de cette même demi-colonne — n'y est pas encore. $X$ doit
+  être inséré en premier pour que la configuration finale soit
+  physiquement valide (invariant Back-First). \\
+\bottomrule
+\end{tabular}
+\caption{Types d'arcs du graphe de dépendances}
+\end{table}
+
+\subsection{Classification Stratégique des Bacs}
+L'analyse des degrés d'un nœud permet de classifier chaque bac selon 4 profils tactiques, guidant la prise de décision de l'heuristique :
+\begin{description}
+    \item[1. Le Bac Passif (Degré Entrant $>0$, Degré Sortant $=0$)] \hfill \\
+    Ce bac est bloqué, mais ne restreint les mouvements d'aucun autre élément. C'est une cible de libération.
+    \item[2. Le Bloqueur Actif (Degré Entrant $=0$, Degré Sortant $>0$)] \hfill \\
+    Ce bac est libre, mais sa position actuelle paralyse d'autres éléments. \textbf{Cible prioritaire d'extraction}.
+    \item[3. Le Nœud de Cycle (Degré Entrant $>0$, Degré Sortant $>0$)] \hfill \\
+    Ce bac est à la fois bloqué et bloqueur (Deadlock).
+    \item[4. Le Bac Autonome (Degré Entrant $=0$, Degré Sortant $=0$)] \hfill \\
+    Aucune contrainte entrante ni sortante.
+\end{description}
+
+% -------------------------------------------------------
+\section{Logique Fondamentale : Le Rôle des Buffers Hors-Cycle}
+% -------------------------------------------------------
+Un interblocage (deadlock) survient lorsqu'un sous-ensemble de bacs forme un cycle d'arcs dans le graphe orienté. La seule solution physique pour rompre ce verrou est d'extraire l'une des composantes du cycle vers un espace de dégagement temporaire (buffer). La sélection de cet espace obéit à une dichotomie stricte :
+\begin{itemize}
+    \item \textbf{Buffer Intra-cycle (Destructeur)} : Déplacer un bac vers une position vide située dans une colonne abritant déjà un autre membre du cycle. Provoque des oscillations.
+    \item \textbf{Buffer Extra-cycle / Hors-cycle (Libérateur)} : Déplacer un bac vers une colonne totalement neutre vis-à-vis du cycle. Cette translation brise la dépendance topologique.
+\end{itemize}
+
+% -------------------------------------------------------
+\section{Mécanique de Résolution : Fonctionnement Étape par Étape}
+% -------------------------------------------------------
+
+L'heuristique opère selon un processus strictement itératif. À chaque cycle de décision, l'algorithme cartographie l'entrepôt, génère des options, anticipe leurs conséquences via le Beam Search, gère les cycles cachés et les stagnations, puis n'exécute physiquement que le tout premier mouvement de la meilleure séquence.
+
+\begin{figure}[H]
+    \centering
+    \resizebox{\textwidth}{!}{%
+    \begin{tikzpicture}[
+        node distance=0.8cm and 1.2cm,
+        >=Stealth,
+        startend/.style={rectangle, rounded corners=3mm, draw=bleuDIBP, fill=bleuDIBP!10, thick, text width=4cm, align=center, minimum height=1cm, font=\bfseries},
+        process/.style={rectangle, draw=vertDef, fill=vertDef!5, thick, text width=5.5cm, align=center, minimum height=1cm},
+        decision/.style={diamond, aspect=2, draw=orangeHyp, fill=orangeHyp!10, thick, text width=4cm, align=center, inner sep=0pt, font=\bfseries},
+        security/.style={rectangle, draw=rougeObj, fill=rougeObj!5, thick, text width=5cm, align=center, minimum height=1cm, font=\bfseries},
+        failure/.style={rectangle, rounded corners=3mm, draw=rougeObj, fill=rougeObj!10, thick, text width=3cm, align=center, minimum height=1cm, font=\bfseries},
+        arrow/.style={->, thick, draw=black!70}
+    ]
+
+    % --- Nodes ---
+    \node[startend] (start) {Début de l'itération};
+    
+    \node[process, below=of start] (step1) {\textbf{Étape 1 : Cartographie}\\Construction du graphe et calcul des Degrés (In/Out)};
+    
+    \node[decision, below=of step1] (dec1) {Existe-t-il des\\bacs libres (In=0)\\avec cible vide ?};
+    
+    \node[process, right=of dec1, xshift=2.5cm] (step2A) {\textbf{Étape 2A : Happy Path}\\Génération des trajectoires directes vers les cibles};
+    
+    \node[process, below=of dec1] (step2B) {\textbf{Étape 2B : Détection Cycle}\\Parcours DFS pour isoler le premier cycle et appliquer l'Héritage Physique};
+    
+    \node[process, below=of step2B] (step2C) {\textbf{Étape 2C : Filtre Local}\\Évaluation géographique pour conserver le Top 3 Buffers};
+    
+    % Porte de sortie de Saturation
+    \node[failure, right=of step2C, xshift=0.5cm] (fail_sat) {FIN\\Échec\\(Saturation)};
+    
+    \node[process, below=of step2C] (step3) {\textbf{Étape 3 : Beam Search}\\Simulation Anticipative \\ (Profondeur $D=5$, Largeur $W=3$)};
+    
+    \node[process, below=of step3] (step4) {\textbf{Étape 4 : Évaluation Globale}\\Application du score $S_{global}$ pour désigner la meilleure branche};
+
+    % Nœuds de sécurité (Anti-Stagnation)
+    \node[decision, below=of step4] (dec_stag) {Compteur de\\Stagnation\\$\ge 12$ ?};
+    
+    \node[security, right=of dec_stag, xshift=1cm] (step_stag) {\textcolor{rougeObj}{Coupe-circuit}\\Extraction forcée d'urgence du bac le plus ancien};
+    
+    \node[process, below=of dec_stag] (step5) {\textbf{Étape 5 : Exécution}\\Réalisation physique du 1er mouvement et Mise en Tabou};
+    
+    \node[decision, below=of step5] (dec2) {Tous les bacs\\sont-ils rangés ?};
+    
+    \node[startend, below=of dec2] (end) {FIN (Succès)};
+    
+    % Portes de sortie Timeout
+    \node[decision, left=of step5, xshift=-1cm] (dec_timeout) {Itérations\\$\ge$ Max ?};
+    \node[failure, left=of dec_timeout, xshift=-0.5cm] (fail_timeout) {FIN\\Échec\\(Timeout)};
+
+    % --- Paths ---
+    \draw[arrow] (start) -- (step1);
+    \draw[arrow] (step1) -- (dec1);
+    
+    \draw[arrow] (dec1) -- node[above, font=\bfseries] {Oui} (step2A);
+    \draw[arrow] (dec1) -- node[right, font=\bfseries] {Non (Deadlock)} (step2B);
+    
+    \draw[arrow] (step2B) -- (step2C);
+    
+    \draw[arrow] (step2C) -- node[above, font=\bfseries, align=center] {0 Buffer\\légal} (fail_sat);
+    \draw[arrow] (step2C) -- node[right, font=\bfseries] {Top 3} (step3);
+    
+    % Routage du Happy Path vers le Beam Search
+    \draw[arrow] (step2A.south) |- (step3.east);
+    
+    % BASCULE DYNAMIQUE (Deadlock virtuel dans le Lookahead)
+    \draw[arrow, dashed, draw=orangeHyp] (step3.west) -- ++(-1.5,0) |- node[pos=0.25, left, align=right, font=\footnotesize\color{orangeHyp}] {\textbf{Bascule Dynamique}\\(Deadlock virtuel\\détecté à $p+1$)} (step2B.west);
+
+    \draw[arrow] (step3) -- (step4);
+    \draw[arrow] (step4) -- (dec_stag);
+    
+    % Routage de la stagnation
+    \draw[arrow] (dec_stag) -- node[right, font=\bfseries] {Non} (step5);
+    \draw[arrow] (dec_stag) -- node[above, font=\bfseries] {Oui} (step_stag);
+    
+    % Le coupe-circuit rejoint la vérification finale
+    \draw[arrow] (step_stag.south) |- (dec2.east);
+
+    \draw[arrow] (step5) -- (dec2);
+    \draw[arrow] (dec2) -- node[right, font=\bfseries] {Oui} (end);
+    
+    % Ligne de retour final avec vérification Timeout
+    \draw[arrow] (dec2.west) -| node[above, near start, font=\bfseries] {Non} (dec_timeout.south);
+    \draw[arrow] (dec_timeout) -- node[above, font=\bfseries] {Oui} (fail_timeout);
+    \draw[arrow] (dec_timeout.north) |- node[right, near start, font=\bfseries] {Non} (start.west);
+    
+    \end{tikzpicture}
+    }
+    \caption{Logigramme intégral de l'heuristique H2 incluant les portes d'échec (Saturation et Timeout) et les mécanismes de sécurité.}
+    \label{fig:logigramme}
+\end{figure}
+
+\subsection{Détail des Étapes de l'Entonnoir}
+
+\begin{description}
+    \item[Étape 1 : Cartographie Topologique] \hfill \\
+    Avant toute décision, l'algorithme reconstruit le graphe (Arcs Durs, Occupation, Séquencement) et recalcule le degré de contrainte de chaque élément.
+    
+    \item[Étape 2A : La Priorisation du Séquencement Direct (Happy Path)] \hfill \\
+    L'algorithme vérifie s'il existe des bacs dont le \textbf{Degré Entrant est nul}. Si de tels éléments ont accès à leur destination, l'algorithme génère \textbf{exclusivement} ces mouvements. \emph{Il n'y a pas de sélection arbitraire à ce stade : s'il y a plusieurs Happy Paths simultanés, toutes les options sont envoyées au simulateur (Étape 3). Le départage (qui jouer en premier ?) se fera naturellement dans le simulateur grâce au score kilométrique, optimisant ainsi le trajet de la navette. L'heuristique n'exécute jamais un coup "à l'aveugle", même unique : elle le simule d'abord pour anticiper les cascades d'ouvertures qu'il va générer sur les profondeurs suivantes.}
+    
+    \item[Étapes 2B \& 2C : Traitement de la Multiplicité des Cycles (Cas de Deadlock)] \hfill \\
+    S'il n'y a aucun Happy Path, l'entrepôt est bloqué. L'algorithme déploie un parcours en profondeur (DFS) mécanique sur les bacs. \textbf{Il s'arrête net au tout premier cycle rencontré}, sans chercher à cartographier les autres. Ce choix d'ingénierie évite l'explosion combinatoire. 
+    Ensuite, le système applique la règle d'\textbf{Héritage Physique} : si un bac du cycle est physiquement bloqué à l'ARRIÈRE, c'est le bac situé devant lui (à l'AVANT) qui est désigné comme candidat à l'extraction. L'algorithme trie alors tous les candidats du cycle par pouvoir de nuisance (degré sortant), et évalue pour chacun d'eux les 3 meilleurs buffers de dégagement possibles. Si aucun emplacement légal n'est trouvé pour personne, l'algorithme conclut à une \textbf{Saturation Physique} (Échec).
+
+    \item[Étapes 3 \& 4 : Anticipation et Jugement (Beam Search)] \hfill \\
+    L'algorithme soumet l'intégralité des combinaisons générées (ex: 5 bacs du cycle $\times$ 3 buffers $= 15$ mouvements) au simulateur Beam Search. Celui-ci clone l'entrepôt et explore les conséquences sur 5 itérations de profondeur ($D=5$).
+    Pour éviter une explosion exponentielle (ex: $15^5 = 759\,375$ simulations), le Beam Search applique une \textbf{Largeur de Faisceau stricte} ($W=3$). À chaque niveau de profondeur, le nombre de branches explorées est plafonné et calculé ainsi (en prenant l'exemple d'un facteur de branchement de 15 mouvements possibles) :
+    \begin{itemize}[noitemsep,topsep=4pt]
+        \item \textbf{Profondeur 1 (p=0)} : On simule l'intégralité des $15$ états possibles issus de la configuration réelle. On calcule le score global de chacun d'eux et on ne garde que les $W = 3$ meilleurs.
+        \item \textbf{Profondeur 2 (p=1)} : Pour chacun des $3$ états conservés, on génère à nouveau $15$ mouvements potentiels. Cela produit $3 \times 15 = 45$ simulations. On calcule leurs scores et on ne conserve de nouveau que les $3$ meilleurs états généraux.
+        \item \textbf{Profondeur 3 (p=2)} : Les $3$ survivants génèrent chacun $15$ possibilités, soit $3 \times 15 = 45$ simulations. On conserve les $3$ meilleures.
+        \item \textbf{Profondeur 4 (p=3)} : À nouveau, $3 \times 15 = 45$ simulations de mouvements. On conserve les $3$ meilleures.
+        \item \textbf{Profondeur 5 (p=4)} : La dernière étape évalue une ultime fois $3 \times 15 = 45$ configurations.
+    \end{itemize}
+    Le nombre total de simulations à exécuter en mémoire est la somme linéaire de ces étapes : $15_{\text{ (Prof. 1)}} + 45_{\text{ (Prof. 2)}} + 45_{\text{ (Prof. 3)}} + 45_{\text{ (Prof. 4)}} + 45_{\text{ (Prof. 5)}} = 195$ simulations (contre $759\,375$ pour une exploration exhaustive), offrant une anticipation massive en un temps minimal de calcul.
+    \emph{Note sur la Bascule Dynamique :} Si un clone débute par un Happy Path à $p=0$, mais génère un entrepôt bloqué à $p=1$, l'algorithme redirige automatiquement ce clone vers la logique de Détection de Cycle (Étape 2B) au sein de la même simulation.
+
+\begin{figure}[H]
+    \centering
+    \begin{tikzpicture}[
+        scale=0.9, every node/.style={transform shape},
+        state/.style = {circle, draw=blue!50, fill=blue!10, thick, minimum size=8mm},
+        selected/.style = {circle, draw=green!60!black, fill=green!15, thick, minimum size=8mm},
+        pruned/.style = {circle, draw=gray!40, fill=gray!5, dashed, minimum size=8mm, text=gray!50},
+        best/.style = {circle, draw=orange!80!black, fill=orange!25, ultra thick, minimum size=8mm},
+        arrow/.style = {-{Stealth[scale=1.0]}, thick},
+        bestarrow/.style = {-{Stealth[scale=1.2]}, orange!90!black, ultra thick},
+        prunedarrow/.style = {-{Stealth[scale=0.8]}, gray!30, dashed}
+    ]
+
+    % --- LEVEL 0 (Root) ---
+    \node[state] (R) at (0,0) {Racine};
+
+    % --- LEVEL 1 (D=1, W=3 kept) ---
+    \node[selected] (L1_1) at (-3,-1.8) {S1};
+    \node[selected] (L1_2) at (-1.5,-1.8) {S2};
+    \node[selected] (L1_3) at (0,-1.8) {S3};
+    \node[pruned]   (L1_4) at (1.5,-1.8) {P1};
+    \node[pruned]   (L1_5) at (3,-1.8) {P2};
+
+    \draw[arrow] (R) -- (L1_1);
+    \draw[arrow] (R) -- (L1_2);
+    \draw[arrow] (R) -- (L1_3);
+    \draw[prunedarrow] (R) -- (L1_4);
+    \draw[prunedarrow] (R) -- (L1_5);
+
+    % --- LEVEL 2 (D=2, W=3 kept) ---
+    \node[pruned] (L2_1) at (-3.5,-3.6) {P3};
+    \node[selected] (L2_2) at (-2.7,-3.6) {S4};
+    
+    \node[selected] (L2_3) at (-1.2,-3.6) {S5};
+    \node[pruned] (L2_4) at (-0.4,-3.6) {P4};
+    
+    \node[selected] (L2_5) at (1.3,-3.6) {S6};
+    \node[pruned] (L2_6) at (2.1,-3.6) {P5};
+
+    \draw[arrow] (L1_1) -- (L2_1);
+    \draw[arrow] (L1_1) -- (L2_2);
+    \draw[arrow] (L1_2) -- (L2_3);
+    \draw[arrow] (L1_2) -- (L2_4);
+    \draw[arrow] (L1_3) -- (L2_5);
+    \draw[arrow] (L1_3) -- (L2_6);
+
+    % --- LEVEL 3 (D=3, W=3 kept) ---
+    \node[pruned] (L3_1) at (-3.2,-5.4) {P6};
+    \node[best] (L3_2) at (-2.4,-5.4) {S7};
+    
+    \node[selected] (L3_3) at (-1.0,-5.4) {S8};
+    \node[pruned] (L3_4) at (-0.2,-5.4) {P7};
+    
+    \node[selected] (L3_5) at (1.5,-5.4) {S9};
+    \node[pruned] (L3_6) at (2.3,-5.4) {P8};
+
+    \draw[arrow] (L2_2) -- (L3_1);
+    \draw[arrow] (L2_2) -- (L3_2);
+    \draw[arrow] (L2_3) -- (L3_3);
+    \draw[arrow] (L2_3) -- (L3_4);
+    \draw[arrow] (L2_5) -- (L3_5);
+    \draw[arrow] (L2_5) -- (L3_6);
+
+    % --- LEVEL 4 & 5 (Dotted compression) ---
+    \node[draw, dashed, rounded corners, inner sep=6pt, fill=gray!5] (Dots) at (-0.5,-7.2) {
+        \begin{tabular}{c}
+            \textbf{Profondeurs 4 \& 5} \\
+            Expansion et sélection des $W=3$ meilleurs à chaque étape \\
+            jusqu'au niveau final de décision ($D=5$)
+        \end{tabular}
+    };
+    
+    \draw[bestarrow] (L3_2) -- (-2.4,-6.6);
+    \draw[arrow] (L3_3) -- (-1.0,-6.6);
+    \draw[arrow] (L3_5) -- (1.5,-6.6);
+
+    % Highlight Best Path
+    \draw[bestarrow] (R) -- (L1_1);
+    \draw[bestarrow] (L1_1) -- (L2_2);
+    \draw[bestarrow] (L2_2) -- (L3_2);
+
+    % --- LABELS ON THE RIGHT ---
+    \node[anchor=west, font=\itshape\color{gray}, scale=0.9] at (4.5, 0) {Configuration actuelle (Réelle)};
+    \node[anchor=west, font=\itshape\color{gray}, scale=0.9] at (4.5, -1.8) {Prof. 1 ($p=0$) : évalue $N$ coups, garde $W=3$};
+    \node[anchor=west, font=\itshape\color{gray}, scale=0.9] at (4.5, -3.6) {Prof. 2 ($p=1$) : évalue $3 \times N$ coups, garde $W=3$};
+    \node[anchor=west, font=\itshape\color{gray}, scale=0.9] at (4.5, -5.4) {Prof. 3 ($p=2$) : évalue $3 \times N$ coups, garde $W=3$};
+
+    % --- LEGEND BOX ---
+    \draw[draw=gray!40, fill=white, rounded corners] (-6.0, 0.4) rectangle (-1.2, 1.6);
+    \node[anchor=west, scale=0.8] at (-5.8, 1.3) {\textcolor{green!60!black}{$\bullet$} Conservé ($W=3$)};
+    \node[anchor=west, scale=0.8] at (-3.6, 1.3) {\textcolor{gray!50}{$\bullet$} Élagué (Pruned)};
+    \node[anchor=west, scale=0.8] at (-5.8, 0.7) {\textcolor{orange!90!black}{$\bullet$} Optimal final};
+    \node[anchor=west, scale=0.8] at (-3.6, 0.7) {\textcolor{orange!90!black}{$\rightarrow$} Chemin choisi};
+
+    \end{tikzpicture}
+    \caption{Structure de l'arbre de décision du Beam Search ($D=5, W=3$). Seuls les 3 meilleurs univers (en vert/orange) sont conservés à chaque étape de profondeur, limitant de manière drastique l'expansion de l'arbre combinatoire.}
+    \label{fig:arbre_beam_search}
+\end{figure}
+
+
+    \item[Étape de Sécurité : Mécanisme Anti-Stagnation] \hfill \\
+    Ce mécanisme surveille l'exécution \textbf{réelle} de l'algorithme. Si l'heuristique valide et exécute physiquement 12 manœuvres dans des buffers sans jamais parvenir à déposer un seul bac sur sa cible finale, le coupe-circuit s'active pour briser les méta-cycles d'oscillation (ping-pong stérile). Le système contourne alors totalement l'évaluation par Beam Search et procède à une extraction d'urgence selon la procédure stricte suivante :
+    \begin{enumerate}[noitemsep]
+        \item \textbf{Tri par Ancienneté :} Il classe l'intégralité des bacs de l'entrepôt selon la date de leur dernier mouvement (du plus figé au plus récemment bougé).
+        \item \textbf{Ciblage de la Racine Dormante :} Il sélectionne le bac \textbf{le plus anciennement immobile} qui soit physiquement accessible à l'instant T (c'est-à-dire situé à l'AVANT, ou à l'ARRIÈRE avec un emplacement AVANT vide).
+        \item \textbf{Extraction Forcée :} Il force le déplacement immédiat de ce bac figé vers le premier buffer extra-colonne disponible.
+        \item \textbf{Reset :} Il réinitialise le compteur de stagnation à zéro, redonnant la main au Beam Search pour qu'il exploite cette nouvelle "ouverture" topologique.
+    \end{enumerate}
+    
+    \item[Étape 5 : Retour au Présent] \hfill \\
+    L'algorithme extrait le tout premier mouvement de la séquence anticipée gagnante (ou de l'urgence), l'exécute sur le véritable entrepôt, inscrit la case source en mémoire Tabou, et relance l'Étape 1.
+\end{description}
+
+% -------------------------------------------------------
+\section{Architecture d'Évaluation : Topologie vs. Géographie}
+% -------------------------------------------------------
+
+Avant de déployer la recherche combinatoire du Beam Search, le système effectue des tris préliminaires. Il existe une stricte différence entre la façon dont le système "note" un mouvement candidat immédiat (Filtre Local) et la façon dont il "note" une situation globale future.
+
+\subsection{Évaluation Locale : Tri Préliminaire des Candidats}
+
+Pour limiter la largeur de l'arbre et accélérer le traitement, un filtre de sélection initial est imposé aux options générées avant la simulation.
+
+\subsubsection{Le Filtre "Happy Path"}
+Lorsqu'un bac est topologiquement libre et que sa destination finale l'est aussi (Happy Path), le mouvement est généré directement. Son score local est purement kilométrique (effort de la navette) :
+\begin{equation*}
+    \text{Score}_{\text{Happy}} = \text{Dist}(\text{Navette}, \text{Source}) + \text{Dist}(\text{Source}, \text{Cible})
+\end{equation*}
+L'objectif n'est pas de restreindre ou pénaliser ces mouvements par une logique mathématique, mais de les soumettre bruts au Beam Search. Ce score kilométrique sera simplement additionné au Score Global avec un poids très faible ($-1$ par distance). Il agira comme un \textbf{départage (Tie-Breaker)} parfait : si deux Happy Paths débloquent le même nombre de bacs, l'algorithme préférera naturellement envoyer la navette vers le trajet le plus court pour gagner du temps.
+
+\subsubsection{Le Filtre "Buffer" (Cassure de Deadlock)}
+Lorsqu'un deadlock force le système à déplacer une composante racine du cycle vers un buffer temporaire, les options foisonnent. Le "Filtre Local" n'en conservera que 3 (le Top 3) par bac candidat, agissant comme un entonnoir pour protéger le Beam Search. Ce tri repose sur des \textbf{pénalités massives (Big-M)} pour éradiquer les aberrations topologiques avant la simulation :
+\begin{equation*}
+    \text{Score}_{\text{Buffer}} = \text{Trajet}_{\text{immédiat}} + \text{Trajet}_{\text{futur\_estimé}} + \sum \text{Pénalités}
+\end{equation*}
+\begin{itemize}[noitemsep]
+    \item \textbf{Interdiction Intra-Cycle ($+1000$)} : Empêche l'utilisation d'une colonne impliquée dans le cycle comme tampon, évitant ainsi un enlisement irrécupérable.
+    \item \textbf{Destruction de Buffer ($+500$)} : Pénalise le largage d'un bac à l'AVANT si cela condamne l'accès à un emplacement ARRIÈRE actuellement vide et précieux.
+    \item \textbf{Prison ($+300$)} : Pénalise l'emprisonnement d'un bac mal placé à l'ARRIÈRE sous un nouveau bac déposé à l'AVANT.
+    \item \textbf{Vol de Cible ($+200$ ou $+400$)} : Évite d'utiliser un buffer qui polluerait la destination finale légitime d'un autre bac (+200). Le système ajoute une seconde pénalité (+200) si utiliser l'AVANT bloque l'accès physique à une autre cible finale à l'ARRIÈRE, portant le "double vol" à la somme catastrophique de +400.
+    \item \textbf{Pénalité de Profondeur ($+1$ par défaut)} : Une micro-pénalité de départage (\textit{tie-breaker}) appliquée lorsqu'un bac est déposé à l'AVANT plutôt qu'à l'ARRIÈRE, favorisant ainsi le remplissage du fond de l'entrepôt.
+\end{itemize}
+
+\subsection{L'Évaluation Globale par le Beam Search (L'Équation Fondamentale)}
+Le moteur Beam Search évalue les arbres d'états à la profondeur requise. Il ne note pas la nature d'un mouvement (comme le filtre local), mais \textbf{la qualité de l'état topologique global} (la photographie de l'entrepôt) qui résulte de la séquence de mouvements simulés.
+
+L'équation globale, qui désigne la séquence gagnante à la fin de la simulation, se formule ainsi :
+\begin{equation}
+    S_{\text{global}} = 2000 \cdot N_{\text{cible}} + 1000 \cdot N_{\text{débloqué}} + 500 \cdot S_{\text{survie}} + 200 \cdot S_{\text{cassure}} - 50 \cdot D^{\text{max}}_{\text{entrant}} - 20 \cdot \Sigma(\text{Degrés}_{\text{entrants}}) - \text{Dist}
+\end{equation}
+
+Chaque poids de ce polynôme a été méticuleusement calibré pour garantir une convergence agressive vers la solution :
+\begin{description}
+    \item[$\mathbf{+2000 \cdot N_{\text{cible}}}$ : L'Incentive Majeur (Bac placé).] \hfill \\
+    C'est la priorité absolue. Ce terme récompense massivement la situation où un bac se trouve à sa destination finale. $N_{\text{cible}}$ représente le nombre total de bacs bien placés dans l'entrepôt à l'état simulé. Dès qu'un bac atteint son emplacement cible définitif, il sécurise un bonus perpétuel de $+2000$ points.
+    
+    \item[$\mathbf{+1000 \cdot N_{\text{débloqué}}}$ : La Prime d'Anticipation.] \hfill \\
+    Récompense lourdement la libération topologique des bacs. $N_{\text{débloqué}}$ compte le nombre de bacs restant à placer qui, dans le graphe de dépendance de l'état simulé, possèdent un \textbf{degré entrant nul} (c'est-à-dire qu'aucun autre bac ne les bloque physiquement ou séquentiellement). C'est le cœur de l'anticipation : déplacer un bac dans un buffer peut sembler infructueux à court terme, mais s'il permet de faire passer le degré entrant d'un autre bac à 0, l'état simulé gagne immédiatement $+1000$ points.
+
+    \item[$\mathbf{+500 \cdot S_{\text{survie}}}$ : La Préservation des Buffers.] \hfill \\
+    $S_{\text{survie}}$ représente le nombre d'emplacements vides et physiquement accessibles en dehors des colonnes impliquées dans le \textbf{premier cycle détecté} par le parcours en profondeur (DFS). Ce bonus de $+500$ incite le système à maintenir des zones de dégagement saines (extra-cycles) pour éviter l'asphyxie physique de l'entrepôt. \textit{Filet de sécurité : s'il ne reste aucun buffer extra-cycle (ex. cycle géant), le système se rabat sur la valorisation de chaque buffer total ouvert à hauteur d'une fraction de point ($0.1$) pour maintenir une respiration d'évaluation minimale.}
+
+    \item[$\mathbf{+200 \cdot S_{\text{cassure}}}$ : L'Éradication des Cycles.] \hfill \\
+    Si le graphe de l'état simulé ne contient plus aucun cycle complexe, $S_{\text{cassure}} = 50$ (apportant un bonus de $+10\,000$). S'il reste des cycles, $S_{\text{cassure}} = -N_{\text{nœuds\_en\_cycle}}$, pénalisant la présence de grands cycles. Le système cherche donc activement à réduire la taille des cycles ou à les casser totalement.
+
+    \item[$\mathbf{-50 \cdot D^{\text{max}}_{\text{entrant}}}$ : La Lutte contre l'Entrave.] \hfill \\
+    Pénalise sévèrement le système tant que le bac le plus "entravé" du graphe (celui qui subit le plus grand nombre de blocages simultanés) n'est pas soulagé. $D^{\text{max}}_{\text{entrant}}$ est le degré entrant maximum d'un nœud du graphe. Le système cherche ainsi à résorber les plus gros goulots d'étranglement de l'entrepôt.
+
+    \item[$\mathbf{-20 \cdot \Sigma(\text{Degrés}_{\text{entrants}})}$ : Le Nettoyage de Graphe.] \hfill \\
+    Une pression continue sur la densité du graphe. $\Sigma(\text{Degrés}_{\text{entrants}})$ (équivalente à la somme des degrés sortants) représente le nombre total d'arcs de blocage. Une diminution du nombre total de dépendances d'un état par rapport à un autre équivaut à un gain de $+20$ points par dépendance éliminée.
+
+    \item[$\mathbf{-\text{Dist}}$ : L'Accumulation Kilométrique (Le Départageur).] \hfill \\
+    Il s'agit du malus de distance physique cumulée. Il ne sert qu'à départager deux états présentant une équivalence topologique.
+\end{description}
+
+\subsection{Dynamique Inter-Étape : Accumulation de la Distance et Graphisation}
+Pour comprendre le fonctionnement de l'évaluation lors des simulations à des profondeurs élevées ($D \ge 2$), deux mécanismes fondamentaux doivent être explicités :
+
+\subsubsection{Accumulation de la Distance}
+La variable $\text{Dist}$ dans le Score Global n'est pas réinitialisée à chaque étape, mais est \textbf{cumulée le long du chemin simulé}. À la profondeur $p$, la distance est la somme des distances de tous les déplacements effectués du niveau 0 au niveau $p$ :
+\begin{equation*}
+    \text{Dist}^{(p)} = \text{Dist}^{(p-1)} + \text{Coût\_Mouvement}^{(p)}
+\end{equation*}
+où le $\text{Coût\_Mouvement}$ est calculé dynamiquement selon la nature du déplacement :
+\begin{itemize}[noitemsep]
+    \item \textbf{Happy Path} : Déplacement du bac directement vers sa cible.
+    \begin{equation*}
+        \text{Coût} = \text{Distance}(\text{Navette}, \text{Source}) + \text{Distance}(\text{Source}, \text{Cible})
+    \end{equation*}
+    \item \textbf{Buffer} : Déplacement temporaire d'un bac bloquant.
+    \begin{equation*}
+        \text{Coût} = \text{Distance}(\text{Navette}, \text{Source}) + \text{Distance}(\text{Source}, \text{Buffer})
+    \end{equation*}
+\end{itemize}
+À la fin d'un déplacement, la position simulée de la navette devient la colonne du point de dépôt (la cible ou le buffer), servant de point de départ pour le mouvement de l'étape suivante.
+
+\subsubsection{La Relativité Temporelle du Graphe (Profondeur $\ge 2$)}
+Un aspect crucial du simulateur réside dans le fait que \textbf{chaque étape de simulation évalue le graphe de dépendance associé à sa propre configuration simulée}, et non par rapport à la configuration de départ de l'entrepôt :
+\begin{itemize}
+    \item À la profondeur $p=1$ (évaluation de $D1$), l'algorithme génère le graphe $G_1$ à partir de la configuration obtenue après le mouvement 1.
+    \item À la profondeur $p=2$ (évaluation de $D2$), l'algorithme génère le graphe $G_2$ à partir de la configuration simulée obtenue après le mouvement 1 ET le mouvement 2.
+\end{itemize}
+Par conséquent, les métriques topologiques ($\Sigma(\text{Degrés}_{\text{entrants}})$, $D^{\text{max}}_{\text{sortant}}$, $N_{\text{débloqué}}$, $N_{\text{cible}}$) sont recalculées de façon autonome à chaque étape de la simulation. Les pénalités et bonus de la profondeur 2 sont évalués sur le graphe simulé de la profondeur 2, qui hérite directement des modifications topologiques apportées par la profondeur 1.
+
+\subsection{Mécanismes Anti-Stagnation et Coupe-Circuits}
+Bien que le Lookahead profond soit puissant, son horizon limité (profondeur de 5) peut le rendre momentanément aveugle face à des impasses dont la résolution nécessite plus d'étapes. Pour éviter qu'il ne tombe dans une boucle d'oscillations ("ping-pong" d'un bac entre deux buffers), H2 intègre trois dispositifs de sécurité absolus :
+\begin{itemize}
+    \item \textbf{Le Tabou Dynamique} : Tout mouvement d'un bac depuis une source est interdit pendant $C$ itérations (où $C$ dépend de la taille de l'entrepôt), forçant la navette à explorer d'autres options avant de faire machine arrière.
+    \item \textbf{La Pénalité de Récence (-2000 points)} : Appliquée au niveau racine de l'arbre, cette pénalité de "fatigue" sanctionne sévèrement la re-sélection d'un buffer pour un bac s'il a déjà été bougé récemment, afin de casser la symétrie d'évaluation.
+    \item \textbf{Le Coupe-Circuit par Stagnation (> 12 itérations sans progrès)} : Si l'algorithme n'améliore pas le nombre global de bacs bien placés pendant 12 itérations consécutives, il court-circuite le Beam Search. Il force alors une "rotation" arbitraire : il saisit le bac bloquant le plus anciennement figé et le déplace de force vers un autre emplacement disponible pour briser instantanément l'enlisement.
+\end{itemize}
+
+% -------------------------------------------------------
+\section{Réflexions et Démonstrations Analytiques}
+% -------------------------------------------------------
+
+\subsection{L'Exigence des 2 Buffers (La Loi Physique du Double-Vide)}
+
+Au cours de nos recherches sur les blocages hautement intriqués (voir Figure \ref{fig:probleme_complexe}), l'observation empirique et l'analyse mathématique ont permis d'établir une règle stricte concernant la densité de l'entrepôt : \textbf{il est primordial de disposer d'au moins 2 emplacements vides au total} pour garantir la résolution de 100\% des instances.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{images/Probleme_complexe.png}
+    \caption{Exemple de configuration complexe exigeant des buffers pour dénouer les arcs logiques.}
+    \label{fig:probleme_complexe}
+\end{figure}
+
+\paragraph{Preuve Mathématique : L'impossibilité physique d'un unique buffer}
+Dans un rayonnage en double-profondeur, pour réussir à placer un bac dans une destination finale située à l'\textbf{ARRIÈRE} d'une colonne, il faut obligatoirement que la place à l'\textbf{AVANT} de cette même colonne soit vide au moment où le bac y pénètre. 
+Cela signifie qu'à l'instant précis de l'insertion, \textbf{la colonne cible doit posséder 2 espaces vides simultanément} (l'avant et l'arrière). 
+Par conséquent, si le volume total de l'entrepôt ne dispose que d'\textbf{un seul et unique emplacement vide} (ex: 99 bacs pour 100 places), il est physiquement impossible de réunir 2 espaces vides au même endroit. L'algorithme (quelle que soit sa puissance, même avec un Beam Width ou Depth infinis) ne pourra jamais ranger un bac à l'arrière. Un seul buffer rend donc la résolution mathématiquement impossible dans le pire des cas.
+
+\paragraph{La préférence pour l'extra-cycle et la gestion de l'intra-cycle :}
+Dès que l'entrepôt garantit l'existence de \textbf{2 buffers libres au total}, le verrou physique saute. La résolution s'effectue alors par des permutations directes. Naturellement, l'algorithme privilégiera toujours l'utilisation de buffers \textbf{extra-cycles} car ils permettent de casser le cycle en un minimum de déplacements physiques, optimisant ainsi le trajet et le temps de la navette. C'est exactement le rôle de la pénalité de $+1000$ (Interdiction Intra-Cycle) : elle agit comme un bouclier pour éviter de rallonger les manœuvres inutilement.
+Cependant, \emph{fait remarquable :} cette garantie de $100\%$ de résolution s'applique \textbf{même si les 2 buffers disponibles sont intra-cycles} (c'est-à-dire qu'ils appartiennent à des colonnes déjà bloquées par le cycle). Si le système n'a pas le choix, tous les buffers subissent le malus de $+1000$ et se retrouvent à nouveau à égalité. L'algorithme acceptera alors le sacrifice et les utilisera sans hésiter. Utiliser des buffers intra-cycles exigera simplement \textbf{un plus grand nombre de manœuvres} pour délier le graphe, mais l'heuristique en viendra toujours à bout.
+
+\begin{myhyp}{Postulat de Saturation Critique}
+Pour garantir un taux de succès absolu (100\%) avec notre système, le niveau de remplissage de l'entrepôt doit mécaniquement garantir la disponibilité d'au moins \textbf{2 emplacements libres (buffers)} à tout instant, peu importe leur nature topologique (intra ou extra-cycle). Sous ce seuil (1 seul buffer), le problème est physiquement insoluble pour toute cible arrière.
+\end{myhyp}
+
+% -------------------------------------------------------
+\section{Garanties de Résolution et Cas d'Échec}
+% -------------------------------------------------------
+
+\subsection{La certitude de trouver une solution}
+En s'appuyant sur le postulat précédent, nous affirmons qu'une instance est résolue avec certitude par l'heuristique H2 tant que le volume total de l'entrepôt dispose en permanence d'au moins 2 places vides de contingence pour huiler la mécanique des permutations.
+
+\subsection{Les deux uniques conditions d'échec}
+Le code H2 ne subira \textbf{jamais de Timeout CPU} par explosion combinatoire, car la largeur et la profondeur de l'arbre de recherche sont strictement restreintes par le Beam Search. L'algorithme ne rend les armes que dans deux cas de figure précis, encadrés par des sentinelles logicielles :
+
+\begin{description}
+    \item[1. Saturation Physique et Verrou Topologique (Exception directe \texttt{DeadlockInsoluble})]\hfill \\
+    L'entrepôt est rempli à $100\%$, ou le seul emplacement vide restant est condamné à l'ARRIÈRE d'une colonne bloquée. L'algorithme détecte le cycle, cherche à extraire un bac, mais le "Filtre Buffer" de l'Étape 2C ne trouve littéralement \textbf{aucun emplacement légal} vers lequel déplacer le bac. Le système constate qu'il est physiquement impossible de bouger quoi que ce soit. L'arrêt est propre et instantané.
+    
+    \item[2. Oscillation Macroscopique et Manque d'Espace (Exception \texttt{Timeout})]\hfill \\
+    L'entrepôt bute sur la limite physique d'un seul buffer. L'algorithme déplace indéfiniment les bacs d'une colonne à l'autre sans jamais pouvoir réunir les conditions physiques (le double-vide) nécessaires pour valider le placement final d'un bac à l'arrière. Un chronomètre interne surveille les itérations de la boucle principale (\texttt{max\_iterations}). S'il est dépassé, le système coupe l'exécution pour éviter un ping-pong infini, officialisant l'échec par manque de manœuvrabilité spatiale.
+\end{description}
+
+% -------------------------------------------------------
+\section{Bilan : Pourquoi H2 réussit là où nos versions précédentes échouaient ?}
+% -------------------------------------------------------
+
+Si nos versions antérieures ne parvenaient pas à résoudre 100\% des instances (se bloquant sur les cas denses ou fortement intriqués), c'est parce qu'elles souffraient de trois grandes limites de conception que H2 a su surmonter :
+
+\begin{enumerate}
+    \item \textbf{La Myopie Heuristique (Absence d'anticipation) :}
+    Nos précédentes heuristiques évaluaient les coups "un par un" (Glouton), cherchant le bénéfice immédiat. Face à un cycle géant, déplacer un bac dans un buffer semble être une perte de temps (un "mauvais coup"). H2, grâce à son \textbf{Beam Search (Lookahead de profondeur 5)}, a la capacité de "voir" les effets cascades de ses actions dans le futur. Il accepte un coup apparemment perdant à l'instant $T$ car il calcule qu'il provoquera une avalanche de déblocages (Happy Paths) à l'instant $T+3$.
+    
+    \item \textbf{La Séparation du Filtrage et du Jugement :}
+    Auparavant, nous tentions d'écrire une "équation magique" qui générait directement le bon mouvement. Dans H2, nous avons séparé l'intelligence en deux couches : un \textbf{Générateur strict} (qui interdit de faire n'importe quoi et cible les bacs les plus dangereux via l'Héritage Physique et le Degré Sortant) et un \textbf{Simulateur global} (qui juge non pas la nature du mouvement, mais la pureté de la topologie de l'entrepôt qui en résulte).
+    
+    \item \textbf{Le Respect Absolu de la Physique du Double-Vide :}
+    Les anciennes heuristiques pouvaient se lancer dans des séquences mathématiquement impossibles en double-profondeur, se croyant capables de ranger un bac à l'arrière alors qu'il n'y avait plus d'espace à l'avant pour le laisser passer. H2 modélise parfaitement la différence entre un entrepôt "topologique" et un entrepôt "physique", anticipant les prisons et les destructions de buffers avant de lancer ses clones.
+\end{enumerate}
+
+C'est l'alliance de ce tri chirurgical des deadlocks et de la force brute maîtrisée du Beam Search qui permet aujourd'hui à H2 de pulvériser les verrous logiques et d'atteindre le taux de réussite de 100\% (sous réserve du respect de la loi physique des 2 buffers).
+
+\end{document}

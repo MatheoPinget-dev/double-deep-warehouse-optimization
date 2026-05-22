@@ -28,11 +28,24 @@ from pathlib import Path
 import argparse
 import csv
 import time
+import copy
 
 from instance_generator import (
     Configuration, EmplacementStock, Cote, Profondeur,
     distance, importer_instance
 )
+
+# =============================================================================
+# 0. Exceptions Personnalisées
+# =============================================================================
+
+class DeadlockInsoluble(Exception):
+    """Levée quand un cycle ne peut être cassé (aucun buffer disponible)."""
+    pass
+
+class TimeoutHeuristique(Exception):
+    """Levée quand max_iterations est atteint sans convergence."""
+    pass
 
 # =============================================================================
 # 1. Structures de Graphe et Dépendances
@@ -56,10 +69,16 @@ class GrapheDependance:
     Graphe orienté représentant tous les blocages logiques et physiques
     entre les bacs à l'itération courante.
 
-    Chaque nœud est un bac_id. Un arc A -> B signifie :
+    Chaque nœud est un `bac_id`. Un arc A -> B signifie :
     "Le bac A doit bouger AVANT que le bac B puisse atteindre sa cible."
 
     Ce graphe est recalculé intégralement à chaque itération.
+    
+    Attributes:
+        config_courante (Configuration): L'état actuel de l'entrepôt.
+        config_cible (Configuration): L'état cible à atteindre.
+        noeuds (set): L'ensemble des identifiants des bacs présents.
+        arcs (list[Arc]): La liste des dépendances (arêtes) orientées.
     """
     def __init__(self, config_courante: Configuration, config_cible: Configuration):
         self.config_courante = config_courante
@@ -71,7 +90,9 @@ class GrapheDependance:
     def _construire_graphe(self):
         """
         Construit le graphe orienté des dépendances.
-        Un arc A -> B signifie que le bac A empêche le bac B de faire son mouvement.
+        
+        Identifie et instancie les trois types de blocages (DUR, OCCUPATION, 
+        SÉQUENCEMENT) en fonction de l'état physique et logique des bacs.
         """
         occupes = {emp: bac_id for bac_id, emp in self.config_courante.affectation.items()}
         cibles_inverse = {emp: bac_id for bac_id, emp in self.config_cible.affectation.items()}
@@ -118,15 +139,25 @@ class GrapheDependance:
                         self.arcs.append(Arc(source=bac_j, cible=bac_k, type_dep=TypeDependance.SEQUENCEMENT))
 
     def trouver_bacs_sans_blocage(self) -> list[int]:
-        """Retourne les bacs libres (degré entrant = 0) : personne ne les bloque."""
+        """
+        Identifie les bacs qui n'ont aucune contrainte préalable.
+        
+        Returns:
+            list[int]: La liste des identifiants de bacs n'ayant aucun blocage entrant.
+        """
         bacs_bloques = {arc.cible for arc in self.arcs}
         return [bac for bac in self.noeuds if bac not in bacs_bloques]
 
     def detecter_cycle(self) -> list[Arc] | None:
         """
-        Détection de cycle par DFS (parcours en profondeur).
-        Un cycle = deadlock : A bloque B qui bloque ... qui bloque A.
-        Retourne la liste des arcs formant le cycle, ou None s'il n'y en a pas.
+        Exécute un parcours en profondeur (DFS) pour détecter un cycle.
+        
+        Un cycle (deadlock) correspond à une séquence bloquante circulaire 
+        du type A bloque B qui bloque ... qui bloque A.
+        
+        Returns:
+            list[Arc] | None: La liste des arcs formant le premier cycle détecté,
+            ou None si le graphe est acyclique.
         """
         visite = set()
         pile_appel = []
@@ -160,6 +191,138 @@ class GrapheDependance:
                     return cycle
         return None
 
+    def analyser_graphe(self) -> dict:
+        """
+        Extrait les métriques topologiques globales du graphe.
+        
+        Utilisé pour le tracking itératif et l'analyse post-mortem des échecs.
+
+        Returns:
+            dict: Un dictionnaire contenant les clés :
+                - somme_degres_entrants (int): Proxy de la complexité de blocage global.
+                - degre_max (int): Le degré entrant le plus élevé parmi tous les bacs.
+                - nb_bacs_bloques (int): Le nombre total de bacs subissant un blocage.
+                - bacs_bloqueurs (list[int]): Les bacs causant un blocage.
+                - nb_noeuds_en_cycle (int): Le nombre de bacs piégés dans un interblocage.
+        """
+        degres_entrants = {n: 0 for n in self.noeuds}
+        degres_sortants = {n: 0 for n in self.noeuds}
+        for arc in self.arcs:
+            degres_entrants[arc.cible] += 1
+            degres_sortants[arc.source] += 1
+
+        somme_degres = sum(degres_entrants.values())
+        degre_max = max(degres_entrants.values()) if degres_entrants else 0
+        bacs_bloqueurs = [n for n in self.noeuds if degres_sortants[n] > 0]
+
+        noeuds_en_cycle = set()
+        cycle = self.detecter_cycle()
+        if cycle:
+            for arc in cycle:
+                noeuds_en_cycle.add(arc.source)
+                noeuds_en_cycle.add(arc.cible)
+
+        return {
+            "somme_degres_entrants": somme_degres,
+            "degre_max": degre_max,
+            "nb_bacs_bloques": len({arc.cible for arc in self.arcs}),
+            "bacs_bloqueurs": bacs_bloqueurs,
+            "nb_noeuds_en_cycle": len(noeuds_en_cycle),
+        }
+
+    def analyser_cycles_et_buffers(self) -> dict:
+        """
+        Exécute l'algorithme de Tarjan pour trouver toutes les composantes fortement connexes.
+        
+        Identifie les cycles complexes et calcule la disponibilité des buffers de dégagement
+        par rapport aux bacs impliqués dans ces cycles.
+        
+        Returns:
+            dict: Les métriques de survie des cycles, avec la structure détaillée 
+            pour les buffers extra-cycles.
+        """
+        index = 0
+        indices = {}
+        lowlinks = {}
+        pile = []
+        en_pile = set()
+        sccs = []
+        
+        adj = {n: [] for n in self.noeuds}
+        for arc in self.arcs:
+            adj[arc.source].append(arc.cible)
+
+        def strongconnect(v):
+            nonlocal index
+            indices[v] = index
+            lowlinks[v] = index
+            index += 1
+            pile.append(v)
+            en_pile.add(v)
+            
+            for w in adj[v]:
+                if w not in indices:
+                    strongconnect(w)
+                    lowlinks[v] = min(lowlinks[v], lowlinks[w])
+                elif w in en_pile:
+                    lowlinks[v] = min(lowlinks[v], indices[w])
+                    
+            if lowlinks[v] == indices[v]:
+                scc = set()
+                while True:
+                    w = pile.pop()
+                    en_pile.remove(w)
+                    scc.add(w)
+                    if w == v:
+                        break
+                if len(scc) > 1:
+                    sccs.append(scc)
+                    
+        for v in self.noeuds:
+            if v not in indices:
+                strongconnect(v)
+                
+        colonnes_tous_cycles = set()
+        for scc in sccs:
+            for bac_id in scc:
+                emp = self.config_courante.affectation[bac_id]
+                colonnes_tous_cycles.add((emp.colonne, emp.cote))
+                
+        vides_accessibles = [
+            emp for emp in self.config_courante.emplacements_vides_stock()
+            if self.config_courante.est_accessible(emp)
+        ]
+        
+        resultats_cycles = []
+        for scc in sccs:
+            colonnes_ce_cycle = set()
+            for bac_id in scc:
+                emp = self.config_courante.affectation[bac_id]
+                colonnes_ce_cycle.add((emp.colonne, emp.cote))
+                
+            buffers_hors_ce_cycle = [
+                emp for emp in vides_accessibles 
+                if (emp.colonne, emp.cote) not in colonnes_ce_cycle
+            ]
+            
+            buffers_hors_tous_cycles = [
+                emp for emp in vides_accessibles 
+                if (emp.colonne, emp.cote) not in colonnes_tous_cycles
+            ]
+            
+            resultats_cycles.append({
+                "taille": len(scc),
+                "bacs": sorted(list(scc)),
+                "nb_buffers_hors_ce_cycle": len(buffers_hors_ce_cycle),
+                "nb_buffers_hors_tous_cycles": len(buffers_hors_tous_cycles)
+            })
+            
+        return {
+            "nb_cycles": len(sccs),
+            "details_cycles": resultats_cycles,
+            "nb_buffers_hors_tous_cycles": len([emp for emp in vides_accessibles if (emp.colonne, emp.cote) not in colonnes_tous_cycles]) if sccs else len(vides_accessibles)
+        }
+
 # =============================================================================
 # 2. Heuristique H1 (Greedy Eligible-First)
 # =============================================================================
@@ -167,9 +330,18 @@ class GrapheDependance:
 class HeuristiqueConstructive:
     """
     Implémentation de l'heuristique H1.
+    
     Elle privilégie les bacs éligibles (Happy Path) selon des priorités empiriques
     (poids statiques), et casse les deadlocks en évaluant les buffers par score
     de pénalité (méthode du Grand-M).
+    
+    Attributes:
+        courante (Configuration): État courant de l'entrepôt.
+        cible (Configuration): État cible final.
+        colonne_navette (int): Position actuelle de la navette.
+        distance_totale_x (int): Distance cumulée parcourue.
+        sequence_mouvements (list[str]): Historique des actions effectuées.
+        nb_double_handling (int): Compteur des dépôts en zone buffer.
     """
     def __init__(self, config_init: Configuration, config_cible: Configuration, p_lib=1, p_vul=2, p_ino=3, pen_avant=1, cap_tabou=20):
         self.courante = config_init
@@ -181,31 +353,89 @@ class HeuristiqueConstructive:
         self.derniers_buffers = {}    # bac_id -> itération du dernier buffer
         self.tabu_mouvements = {}     # (bac_id, emp) -> itération_expiration
         self.iteration_actuelle = 0
+        self.historique: list[dict] = []  # Tracking : métriques graphiques par itération
 
-        # [PARAMÈTRE OPTIMISÉ] 10× le nombre de bacs garantit la résolution
-        self.max_iterations = len(config_init.affectation) * 10
+        n_bacs = len(config_init.affectation)
+        # Plafond sécurisé : n² plafonné à 20×n pour éviter timeout sur grandes instances
+        self.max_iterations = min(n_bacs ** 2, n_bacs * 20)
         self.p_lib = p_lib
         self.p_vul = p_vul
         self.p_ino = p_ino
         self.pen_avant = pen_avant
         self.cap_tabou = cap_tabou
 
+        # Détection d'échec précoce avant de lancer la résolution
+        self._verifier_instance()
+
     def _bac_est_place(self, bac_id: int) -> bool:
-        """Vérifie si le bac a atteint sa destination finale."""
+        """
+        Vérifie si le bac a atteint sa destination finale.
+        
+        Args:
+            bac_id (int): L'identifiant du bac.
+            
+        Returns:
+            bool: True si le bac est sur sa cible.
+        """
         return self.courante.affectation[bac_id] == self.cible.affectation[bac_id]
 
     def _est_cible_pour_un_bac(self, emp: EmplacementStock) -> bool:
-        """Vérifie si un emplacement est une destination finale pour n'importe quel bac."""
+        """
+        Vérifie si un emplacement est une destination finale pour n'importe quel bac.
+        
+        Args:
+            emp (EmplacementStock): L'emplacement à tester.
+            
+        Returns:
+            bool: True si l'emplacement est ciblé par au moins un bac.
+        """
         return emp in self.cible.affectation.values()
+
+    def _verifier_instance(self):
+        """
+        Détection d'échec précoce : vérifie la cohérence structurelle avant résolution.
+        
+        Raises:
+            ValueError: Si l'instance est physiquement ou logiquement invalide 
+            (bacs manquants, cibles doublons, cibles impossibles).
+        """
+        aff_init = self.courante.affectation
+        aff_cible = self.cible.affectation
+
+        # 1. Même ensemble de bacs dans les deux configurations
+        if set(aff_init.keys()) != set(aff_cible.keys()):
+            raise ValueError("Les bacs de la config initiale et cible ne correspondent pas.")
+
+        # 2. Unicité des cibles (pas deux bacs vers le même emplacement final)
+        cibles = list(aff_cible.values())
+        if len(cibles) != len(set(cibles)):
+            raise ValueError("Deux bacs ou plus partagent la même destination finale.")
+
+        # 3. Cohérence AVANT/ARRIÈRE : tout bac ciblant un AVANT doit avoir un
+        #    bac compagnon ciblant l'ARRIÈRE de la même demi-colonne.
+        cibles_set = set(aff_cible.values())
+        for bac_id, cible_emp in aff_cible.items():
+            if cible_emp.profondeur == Profondeur.AVANT:
+                emp_arr = EmplacementStock(cible_emp.colonne, cible_emp.cote, Profondeur.ARRIERE)
+                if emp_arr not in cibles_set:
+                    raise ValueError(
+                        f"Bac {bac_id} cible un AVANT ({cible_emp}) sans bac ciblant l'ARRIÈRE correspondant."
+                    )
 
     def trouver_buffer(self, bac_id: int) -> tuple[EmplacementStock | None, float]:
         """
         Recherche le meilleur emplacement vide accessible comme buffer temporaire.
 
-        Score = distance_navette_vers_buffer + distance_buffer_vers_cible_finale
-                + pénalités (Tabou, Cible réservée, Création de prison)
+        Le score combine les distances de déplacement et des pénalités dissuasives 
+        (méthode Big-M) pour éviter les oscillations (tabou), le vol de cibles
+        et la création de nouveaux blocages.
 
-        Retourne (meilleur_emplacement, score). Si aucun, retourne (None, inf).
+        Args:
+            bac_id (int): L'identifiant du bac à déplacer.
+            
+        Returns:
+            tuple[EmplacementStock | None, float]: Le meilleur buffer trouvé et son score.
+            Si aucun buffer n'est accessible, retourne (None, inf).
         """
         emp_actuel = self.courante.affectation[bac_id]
         col_actuelle = emp_actuel.colonne
@@ -250,8 +480,15 @@ class HeuristiqueConstructive:
 
     def _deplacer_bac(self, bac_id: int, dest: EmplacementStock, est_buffer: bool = False):
         """
-        Exécute le déplacement d'un bac et met à jour toutes les métriques :
-        distance navette, configuration courante, liste tabou, log des mouvements.
+        Exécute le déplacement d'un bac et met à jour toutes les métriques.
+        
+        Actualise la distance de la navette, la configuration courante de l'entrepôt, 
+        la liste tabou pour éviter les retours en arrière immédiats, et le journal.
+        
+        Args:
+            bac_id (int): L'identifiant du bac.
+            dest (EmplacementStock): L'emplacement cible du mouvement.
+            est_buffer (bool): True si le déplacement est vers un buffer.
         """
         source = self.courante.affectation[bac_id]
 
@@ -281,11 +518,21 @@ class HeuristiqueConstructive:
         """
         Détermine la priorité d'un bac éligible pour le Happy Path.
 
-        Profils (du plus au moins prioritaire) :
-          1 — Libérateur : AVANT, bloque un bac mal placé à l'ARRIERE → déplacer débloque.
-          2 — Vulnérable : ARRIERE → risque d'emprisonnement si un bac se pose devant.
-          3 — Inoffensif : AVANT, ARRIERE déjà à sa cible finale → basse priorité.
+        Catégorise le bac en trois profils (du plus au moins prioritaire) :
+          1. Libérateur : En position AVANT et bloque un bac ARRIERE mal placé.
+          2. Vulnérable : En position ARRIERE, risque d'être bloqué.
+          3. Inoffensif : Pas d'impact direct immédiat.
+
+        Args:
+            bac_id (int): L'identifiant du bac à évaluer.
+            
+        Returns:
+            int: Le poids statique attribué (plus faible = plus prioritaire).
         """
+        # Guard : si le bac est déjà à sa cible (ne devrait pas arriver), profil neutre
+        if self._bac_est_place(bac_id):
+            return self.p_ino
+
         emp = self.courante.affectation[bac_id]
 
         if emp.profondeur == Profondeur.ARRIERE:
@@ -303,18 +550,24 @@ class HeuristiqueConstructive:
 
     def planifier_mouvements(self):
         """
-        Boucle principale de résolution.
+        Exécute la boucle principale de résolution itérative.
 
-        À chaque itération :
-          — PHASE 1 (Happy Path) : s'il existe des bacs libres (degré entrant = 0),
-            choisir le plus prioritaire et le placer directement à sa cible.
-          — PHASE 2 (Deadlock) : s'il n'y a aucun bac libre, détecter le cycle,
-            identifier la racine physique et la mettre en buffer temporaire.
+        Sépare le flux en deux phases :
+          - PHASE 1 (Happy Path) : Sélectionne et place un bac sans contrainte
+            vers sa cible (heuristique gloutonne).
+          - PHASE 2 (Deadlock) : En l'absence de bac libre, identifie le cycle,
+            choisit une racine physique et la déplace en buffer temporaire.
+            
+        Raises:
+            TimeoutHeuristique: Si le nombre maximal d'itérations est dépassé.
+            DeadlockInsoluble: Si aucun buffer n'est accessible pour débloquer.
         """
         while True:
             self.iteration_actuelle += 1
             if self.iteration_actuelle > self.max_iterations:
-                raise RuntimeError("Boucle infinie détectée dans l'heuristique.")
+                raise TimeoutHeuristique(
+                    f"Limite de {self.max_iterations} itérations atteinte sans convergence."
+                )
 
             bacs_a_placer = [
                 bac_id for bac_id, emp in self.courante.affectation.items()
@@ -328,14 +581,22 @@ class HeuristiqueConstructive:
                 if self.courante.est_accessible(emp)
             ]
             if not vides_accessibles:
-                # Par l'invariant Back-First du générateur, cette situation
-                # ne devrait pas survenir sur une instance valide.
-                raise RuntimeError("Aucun emplacement vide accessible (instance invalide ?).")
+                raise DeadlockInsoluble("Aucun emplacement vide accessible (instance invalide ?).")
 
-            # --- PHASE 1 : HAPPY PATH ---
+            # --- TRACKING ITÉRATIF : métriques graphiques de l'état courant ---
             graphe = GrapheDependance(self.courante, self.cible)
+            metriques = graphe.analyser_graphe()
+            self.historique.append({
+                "iteration": self.iteration_actuelle,
+                "bacs_mal_places": len(bacs_a_placer),
+                "somme_degres_entrants": metriques["somme_degres_entrants"],
+                "degre_max": metriques["degre_max"],
+                "nb_noeuds_en_cycle": metriques["nb_noeuds_en_cycle"],
+            })
+
             eligibles = [b for b in graphe.trouver_bacs_sans_blocage() if b in bacs_a_placer]
 
+            # --- PHASE 1 : HAPPY PATH (Greedy pur : poids statique + distance) ---
             if eligibles:
                 eligibles.sort(key=lambda b: (
                     self._calculer_poids_strategique(b),
@@ -348,7 +609,7 @@ class HeuristiqueConstructive:
             # --- PHASE 2 : DEADLOCK ---
             arcs_cycle = graphe.detecter_cycle()
             if not arcs_cycle:
-                raise RuntimeError("Blocage insoluble sans cycle détecté (incohérence logique).")
+                raise DeadlockInsoluble("Blocage insoluble sans cycle détecté (incohérence logique).")
 
             # Identifier les racines physiques du cycle (bacs AVANT accessibles)
             candidats = set()
@@ -363,9 +624,8 @@ class HeuristiqueConstructive:
                     candidats.add(bac_avant if bac_avant is not None else bac)
 
             if not candidats:
-                raise RuntimeError("Cycle insoluble : aucune racine physique accessible.")
+                raise DeadlockInsoluble("Cycle insoluble : aucune racine physique accessible.")
 
-            # Évaluer le meilleur buffer pour chaque candidat
             evaluations = [
                 (b, buf, score)
                 for b in candidats
@@ -374,9 +634,8 @@ class HeuristiqueConstructive:
             ]
 
             if not evaluations:
-                raise RuntimeError("Aucun buffer accessible pour casser le cycle.")
+                raise DeadlockInsoluble("Aucun buffer accessible pour casser le cycle.")
 
-            # Choisir le candidat dont le buffer est le moins pénalisant
             evaluations.sort(key=lambda x: (x[2], self.derniers_buffers.get(x[0], -1)))
             bac_choisi, buffer_emp, _ = evaluations[0]
 
@@ -388,11 +647,35 @@ class HeuristiqueConstructive:
 # =============================================================================
 
 def resoudre_instance(fichier: str, verbose: bool = True) -> dict:
-    """Charge une instance, lance H1 et retourne les résultats."""
+    """
+    Point d'entrée pour la résolution complète d'une instance avec H1.
+    
+    Args:
+        fichier (str): Le chemin vers le fichier CSV de l'instance.
+        verbose (bool): Si True, affiche les logs de la résolution.
+        
+    Returns:
+        dict: Les métriques de la résolution (statut, distance, temps, etc.).
+    """
     start_time = time.time()
     heuristique = None
+    echec_degre_max = echec_somme_degres = echec_nb_cycles = echec_iteration = 0
     try:
         init, cible = importer_instance(fichier)
+        if verbose:
+            print(init.afficher("ETAT INITIAL"))
+            print(cible.afficher("ETAT CIBLE"))
+
+            graphe_init = GrapheDependance(init, cible)
+            analyse = graphe_init.analyser_cycles_et_buffers()
+            print(f"\n--- Analyse Initiale des Cycles ---")
+            print(f"Nombre de cycles (SCC > 1) détectés : {analyse['nb_cycles']}")
+            for i, c in enumerate(analyse['details_cycles'], 1):
+                print(f"  Cycle {i} (Taille: {c['taille']} bacs) :")
+                print(f"    - Buffers disponibles hors de CE cycle : {c['nb_buffers_hors_ce_cycle']}")
+                print(f"    - Buffers disponibles hors de TOUS les cycles : {c['nb_buffers_hors_tous_cycles']}")
+            print("-" * 33)
+
         heuristique = HeuristiqueConstructive(init, cible)
         heuristique.planifier_mouvements()
         distance_val = heuristique.distance_totale_x
@@ -402,8 +685,31 @@ def resoudre_instance(fichier: str, verbose: bool = True) -> dict:
             print(f"\n[Terminé] Distance Totale X : {distance_val}")
             for i, m in enumerate(heuristique.sequence_mouvements, 1):
                 print(f"  {i:3d}. {m}")
+    except (DeadlockInsoluble, TimeoutHeuristique) as e:
+        statut = "Deadlock" if isinstance(e, DeadlockInsoluble) else "Timeout"
+        distance_val = heuristique.distance_totale_x if heuristique else -1
+        mouvements = len(heuristique.sequence_mouvements) if heuristique else -1
+        # Capture les métriques graphiques au moment de l'échec
+        if heuristique and heuristique.historique:
+            dernier = heuristique.historique[-1]
+            echec_degre_max = dernier["degre_max"]
+            echec_somme_degres = dernier["somme_degres_entrants"]
+            echec_nb_cycles = dernier["nb_noeuds_en_cycle"]
+            echec_iteration = dernier["iteration"]
+        else:
+            echec_degre_max = echec_somme_degres = echec_nb_cycles = echec_iteration = -1
+        if verbose:
+            print(f"\n[Échec - {statut}] {e}")
+    except ValueError as e:
+        statut = f"Instance invalide"
+        distance_val, mouvements = -1, -1
+        echec_degre_max = echec_somme_degres = echec_nb_cycles = echec_iteration = -1
+        if verbose:
+            print(f"\n[Échec - Validation] {e}")
     except Exception as e:
-        distance_val, mouvements, statut = -1, -1, f"Erreur: {str(e)}"
+        statut = f"Erreur: {str(e)}"
+        distance_val, mouvements = -1, -1
+        echec_degre_max = echec_somme_degres = echec_nb_cycles = echec_iteration = -1
         if verbose:
             print(f"\n[Échec] {statut}")
 
@@ -415,10 +721,22 @@ def resoudre_instance(fichier: str, verbose: bool = True) -> dict:
         "Mouvements": mouvements,
         "Double_Handling": heuristique.nb_double_handling if heuristique else 0,
         "Temps_s": temps_exe,
+        # Métriques graphiques au moment de l'échec (0 si succès)
+        "Echec_Degre_Max": echec_degre_max,
+        "Echec_Somme_Degres": echec_somme_degres,
+        "Echec_Nb_Cycles": echec_nb_cycles,
+        "Echec_Iteration": echec_iteration,
+        # Historique pour tracking itératif (liste de dict)
+        "_historique": heuristique.historique if heuristique else [],
     }
 
 def main():
-    """Point d'entrée CLI : mode unitaire ou lot."""
+    """
+    Interface en ligne de commande (CLI) du module H1.
+    
+    Permet de lancer la résolution soit sur une instance unique (`une`), 
+    soit en traitement par lot sur un dossier complet (`lot`).
+    """
     parser = argparse.ArgumentParser(description="Heuristique H1 - SBS/RS")
     subparsers = parser.add_subparsers(dest="commande", required=True)
 
@@ -450,10 +768,15 @@ def main():
         with open(output_path, "w", newline="") as f_out:
             writer = csv.DictWriter(
                 f_out,
-                fieldnames=["Fichier", "Statut", "Distance_X", "Mouvements", "Double_Handling", "Temps_s"]
+                fieldnames=[
+                        "Fichier", "Statut", "Distance_X", "Mouvements",
+                        "Double_Handling", "Temps_s",
+                        "Echec_Degre_Max", "Echec_Somme_Degres",
+                        "Echec_Nb_Cycles", "Echec_Iteration"
+                    ]
             )
             writer.writeheader()
-            writer.writerows(resultats)
+            writer.writerows({k: v for k, v in r.items() if k != "_historique"} for r in resultats)
         print(f"\nRésultats sauvegardés dans '{args.output}'.")
 
 if __name__ == "__main__":
