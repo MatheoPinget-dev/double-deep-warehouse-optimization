@@ -6,15 +6,16 @@ Ce dépôt contient le code et les heuristiques développés dans le cadre d'un 
 
 Une décision importante pour améliorer les opérations au sein des entrepôts consiste à déterminer l'affectation optimale des articles aux emplacements de stockage (Storage Location Assignment Problem - SLAP). Ces affectations, souvent basées sur les profils de demande (saisonnalité, nouveaux produits), deviennent sous-optimales au fil du temps. Le **problème de réarrangement** (Warehouse Reshuffling Problem - WRP) consiste à déterminer la séquence optimale de déplacements pour atteindre un arrangement cible depuis un arrangement initial donné en entrée.
 
-Le système étudié est un système automatisé de stockage et de déstockage avec navettes (**SBS/RS**). Il est composé :
-- D'une unique étagère de stockage haute de plusieurs étages et longue de plusieurs mètres.
-- De **doubles profondeurs** par emplacement : chaque emplacement peut contenir jusqu'à deux bacs l'un devant l'autre. Le bac de second rang nécessite un cycle de relocation pour être extrait si un bac bloquant est présent au premier rang.
-- De navettes horizontales dédiées (*tier-captive*) se déplaçant à chaque niveau pour stocker et récupérer les bacs.
-- De zones tampons de bout d'allée et d'un ascenseur de capacité 4 pour assurer les mouvements verticaux entre étages.
+Le système étudié s'inspire d'un système automatisé de stockage et de déstockage avec navettes (**SBS/RS**). Bien que la littérature s'intéresse très largement aux systèmes à simple profondeur, la problématique du réarrangement global en **double profondeur** y est quasi-inexistante, ce qui constitue le postulat fondateur et l'originalité de ce travail.
 
-Dans le cadre du problème de réarrangement, l'un des défis algorithmiques majeurs est la présence de **cycles** (permutations circulaires des emplacements entre les bacs). La résolution de ces cycles impose de libérer temporairement un emplacement pour amorcer le déplacement, introduisant une gestion complexe des manipulations intermédiaires.
+Afin d'isoler et de traiter efficacement cette complexité algorithmique inhérente à la double profondeur (où le bac de second rang est bloqué par le premier), le périmètre de modélisation et de résolution a été volontairement recentré sur les hypothèses suivantes :
+- **Opération en temps masqué** : Le réarrangement s'effectue intégralement lors de périodes d'inactivité. Il n'y a donc aucune entrée ni sortie (I/O) de nouveaux bacs pendant la phase d'optimisation.
+- **Périmètre intra-étage (1 étage)** : Le problème se concentre exclusivement sur les déplacements d'une navette horizontale (*tier-captive*) au sein d'un seul et unique niveau de l'étagère.
+- **Exclusion des mouvements verticaux** : La gestion de l'ascenseur et de ses zones tampons attenantes est considérée comme un problème secondaire et est par conséquent exclue du périmètre d'étude. En revanche, l'utilisation stratégique des espaces tampons (buffers) *au sein même de l'étage* reste primordiale pour la résolution algorithmique.
 
-Contrairement à la majorité de la littérature qui cherche classiquement à minimiser le nombre de mouvements, ce travail propose un critère plus adapté aux enjeux de durabilité et d'automatisation : la **minimisation de la distance totale parcourue** par les navettes et l'ascenseur, afin de réduire la consommation énergétique et l'usure mécanique des équipements.
+Dans ce contexte, l'un des défis majeurs est la présence de **cycles d'interblocage** (permutations circulaires des destinations entre les bacs). La résolution de ces cycles impose de libérer temporairement un emplacement pour amorcer le déplacement, introduisant une gestion complexe des manipulations intermédiaires en double profondeur.
+
+Contrairement à la majorité de la littérature qui cherche classiquement à minimiser le nombre de mouvements, l'objectif central de nos heuristiques est la **minimisation de la distance totale parcourue** par la navette sur cet étage. Ce critère est plus pertinent pour répondre aux enjeux de durabilité, car il permet de réduire directement la consommation énergétique et l'usure mécanique de l'équipement.
 
 ### Informations du Stage
 - **Laboratoire** : DISP (Décision & Information pour les Systèmes de Production – UR4570), INSA Lyon
